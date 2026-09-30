@@ -42,7 +42,7 @@ class User(AbstractBaseUser, PermissionsMixin):
     u_name      = models.CharField(max_length=150)
     email       = models.EmailField(unique=True)
     role        = models.CharField(max_length=50, choices=ROLE_CHOICES, default="Lead")
-    is_active   = models.BooleanField(default=True)
+    is_active   = models.BooleanField(default=False)   # activated after email verification
     is_verified = models.BooleanField(default=False)
     created_at  = models.DateTimeField(auto_now_add=True)
     updated_at  = models.DateTimeField(auto_now=True)

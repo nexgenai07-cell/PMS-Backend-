@@ -17,8 +17,20 @@ Including another URLconf
 from django.contrib import admin
 from django.urls import path
 
-from pms_app.views import ProjectTeamMemberStatsView, TeamMemberStatsView, UserStatsView, RegisterView,LoginView,LogoutView,MeView,UserDetailView,UserListView,TeamMemberListCreateView,TeamMemberDetailView,ProjectListCreateView, ProjectDetailView, ProjectTasksView, PTeamDetailView, PTeamListCreateView,  TaskListCreateView, TaskDetailView, TaskCommentsView, CommentListCreateView, CommentDetailView, CommentPinView, NotificationListView, NotificationDetailView, NotificationMarkReadView, NotificationDeleteView, NotificationMarkAllReadView, ProjectStatsView
-
+from pms_app.views import (
+    ProjectTeamMemberStatsView, TeamMemberStatsView, UserStatsView,
+    RegisterView, LoginView, LogoutView, MeView,
+    UserDetailView, UserListView,
+    TeamMemberListCreateView, TeamMemberDetailView,
+    ProjectListCreateView, ProjectDetailView, ProjectTasksView,
+    PTeamDetailView, PTeamListCreateView,
+    TaskListCreateView, TaskDetailView, TaskCommentsView,
+    CommentListCreateView, CommentDetailView, CommentPinView,
+    NotificationListView, NotificationDetailView,
+    NotificationMarkReadView, NotificationDeleteView,
+    NotificationMarkAllReadView, ProjectStatsView,
+    VerifyEmailView, ResendVerificationView,          # 🆕
+)
 
 from rest_framework_simplejwt.views import (
     TokenObtainPairView,
@@ -60,6 +72,9 @@ urlpatterns = [
     path("api/pteam/<pt_id>",PTeamDetailView.as_view(),name="pteam-detail"),
 
     path('api/projects/<p_id>/stats', ProjectStatsView.as_view(), name='project_stats'),
+
+    path('api/auth/verify-email',        VerifyEmailView.as_view(),         name='auth_verify_email'),
+    path('api/auth/resend-verification', ResendVerificationView.as_view(), name='auth_resend_verification'),
 
     path('api/team-members/<id>/stats',TeamMemberStatsView.as_view(),name='team_member_stats'),
     path('api/users/<id>/stats',UserStatsView.as_view(),name='user_stats'),

@@ -5,6 +5,12 @@ from rest_framework.views import APIView
 from rest_framework.response import Response
 from rest_framework.permissions import IsAuthenticated, AllowAny
 from rest_framework_simplejwt.tokens import RefreshToken
+from django.core.mail import send_mail
+from django.conf import settings
+from django.utils.http import urlsafe_base64_encode
+from django.utils.encoding import force_bytes
+from .tokens import email_verification_token
+from .serializers import VerifyEmailSerializer, ResendVerificationSerializer
 
 from .models import User, TeamMember, Project, Task, Comment, Notification, PTeam
 from .serializers import (
@@ -23,6 +29,37 @@ def success(data, status_code=status.HTTP_200_OK):
 def error(msg, status_code=status.HTTP_400_BAD_REQUEST):
     return Response({"success": False, "error": msg}, status=status_code)
 
+# ─────────────────────────────────────────────
+# Email verification helpers
+# ─────────────────────────────────────────────
+
+def _build_verification_link(request, user):
+    """Build the frontend verification URL with uid + token."""
+    uid   = urlsafe_base64_encode(force_bytes(user.id))
+    token = email_verification_token.make_token(user)
+    base  = getattr(settings, 'FRONTEND_URL', 'http://localhost:5173').rstrip('/')
+    return f"{base}/verify-email?uid={uid}&token={token}"
+
+
+def _send_verification_email(user, verification_link):
+    """Send the verification email using Django's configured backend."""
+    subject = "Verify your AEEL-PMS account"
+    message = (
+        f"Hi {user.u_name},\n\n"
+        f"Thanks for registering with AEEL-PMS.\n\n"
+        f"Please click the link below to verify your email address. "
+        f"This link expires in 24 hours.\n\n"
+        f"{verification_link}\n\n"
+        f"If you didn't create this account, you can safely ignore this email.\n\n"
+        f"— The AEEL-PMS Team"
+    )
+    send_mail(
+        subject=subject,
+        message=message,
+        from_email=settings.DEFAULT_FROM_EMAIL,
+        recipient_list=[user.email],
+        fail_silently=False,
+    )
 
 # ═══════════════════════════════════════════════════════════════
 # AUTH VIEWS
@@ -34,13 +71,31 @@ class RegisterView(APIView):
 
     def post(self, request):
         serializer = RegisterSerializer(data=request.data)
-        if serializer.is_valid():
-            user = serializer.save()
-            return success(
-                {"message": "User registered successfully.", "user_id": user.id},
-                status.HTTP_201_CREATED,
+        if not serializer.is_valid():
+            return error(serializer.errors)
+
+        user = serializer.save()
+
+        # Build link + send email. If email fails, delete the user so they
+        # can retry with the same email.
+        try:
+            link = _build_verification_link(request, user)
+            _send_verification_email(user, link)
+        except Exception as e:
+            user.delete()
+            return error(
+                {"detail": f"Could not send verification email: {e}. Please try again."},
+                status.HTTP_503_SERVICE_UNAVAILABLE,
             )
-        return error(serializer.errors)
+
+        return success(
+            {
+                "message": "User registered. Please check your email to verify.",
+                "user_id": user.id,
+                "email":   user.email,
+            },
+            status.HTTP_201_CREATED,
+        )
 
 
 class LoginView(APIView):
@@ -51,6 +106,42 @@ class LoginView(APIView):
         serializer = LoginSerializer(data=request.data)
         if serializer.is_valid():
             return success(serializer.validated_data)
+
+        # Inspect error code so we can return 403 for email-not-verified
+        errors = serializer.errors
+        non_field = errors.get('non_field_errors')
+
+        code = None
+        detail = None
+        if isinstance(non_field, dict):
+            code   = non_field.get('code')
+            detail = non_field.get('detail')
+        elif isinstance(non_field, list) and non_field:
+            detail = non_field[0]
+
+        if code == 'EMAIL_NOT_VERIFIED':
+            return Response(
+                {
+                    "success": False,
+                    "error":   {"detail": detail, "code": code},
+                    "detail":  detail,
+                    "code":    code,
+                },
+                status=status.HTTP_403_FORBIDDEN,
+            )
+
+        if code in ('INVALID_PASSWORD', 'NO_ACCOUNT', 'ACCOUNT_INACTIVE',
+                    'ACCOUNT_DELETED'):
+            return Response(
+                {
+                    "success": False,
+                    "error":   {"detail": detail, "code": code},
+                    "detail":  detail,
+                    "code":    code,
+                },
+                status=status.HTTP_401_UNAUTHORIZED,
+            )
+
         return error(serializer.errors, status.HTTP_401_UNAUTHORIZED)
 
 
@@ -66,7 +157,60 @@ class LogoutView(APIView):
         except Exception as e:
             return error(str(e))
 
+class VerifyEmailView(APIView):
+    """POST /api/auth/verify-email/  — body: { uid, token }"""
+    permission_classes = [AllowAny]
 
+    def post(self, request):
+        serializer = VerifyEmailSerializer(data=request.data)
+        if not serializer.is_valid():
+            return error(serializer.errors, status.HTTP_400_BAD_REQUEST)
+
+        user = serializer.context["user"]
+
+        if user.is_verified and user.is_active:
+            return success({
+                "message": "Email already verified. You can log in.",
+                "already_verified": True,
+            })
+
+        user.is_verified = True
+        user.is_active   = True
+        user.save(update_fields=['is_verified', 'is_active'])
+
+        return success({
+            "message": "Email verified successfully. You can now log in.",
+            "email":   user.email,
+        })
+
+
+class ResendVerificationView(APIView):
+    """POST /api/auth/resend-verification/  — body: { email }"""
+    permission_classes = [AllowAny]
+
+    def post(self, request):
+        serializer = ResendVerificationSerializer(data=request.data)
+        if not serializer.is_valid():
+            return error(serializer.errors, status.HTTP_400_BAD_REQUEST)
+
+        user = serializer.context.get("user")
+
+        # Always return success to prevent email enumeration.
+        # Only actually send if the user exists AND isn't verified.
+        if user and not user.is_verified and not user.is_deleted:
+            try:
+                link = _build_verification_link(request, user)
+                _send_verification_email(user, link)
+            except Exception:
+                pass  # swallow — don't leak whether the send worked
+
+        return success({
+            "message": (
+                "If an account exists with that email and is unverified, "
+                "a new link has been sent."
+            )
+        })
+        
 class MeView(APIView):
     """GET /api/auth/me/  — current user profile"""
     permission_classes = [IsAuthenticated]

@@ -1,14 +1,10 @@
 from rest_framework import serializers
-from .models import User, TeamMember, Project, Task, Comment, Notification, PTeam
-
-from rest_framework import serializers
 from django.contrib.auth import authenticate
 from rest_framework_simplejwt.tokens import RefreshToken
 
-# class UserSerializer(serializers.ModelSerializer):
-#     class Meta:
-#         model- User
-#         feilds= ('id','username','email')
+from .models import User, TeamMember, Project, Task, Comment, Notification, PTeam
+from .tokens import email_verification_token
+
 
 # ─────────────────────────────────────────────
 # Auth Serializers
@@ -22,7 +18,12 @@ class RegisterSerializer(serializers.ModelSerializer):
         fields = ["u_name", "email", "password", "role"]
 
     def create(self, validated_data):
-        return User.objects.create_user(**validated_data)
+        # New users start INACTIVE until they click the verification link.
+        user = User.objects.create_user(**validated_data)
+        user.is_active   = False
+        user.is_verified = False
+        user.save(update_fields=['is_active', 'is_verified'])
+        return user
 
 
 class LoginSerializer(serializers.Serializer):
@@ -31,18 +32,94 @@ class LoginSerializer(serializers.Serializer):
 
     def validate(self, data):
         user = authenticate(username=data["email"], password=data["password"])
+
         if not user:
-            raise serializers.ValidationError("Invalid credentials.")
+            # Distinguish "no account" from "wrong password" for better UX
+            if User.objects.filter(
+                email__iexact=data["email"], is_deleted=False
+            ).exists():
+                raise serializers.ValidationError({
+                    "detail": "Incorrect password.",
+                    "code":   "INVALID_PASSWORD",
+                })
+            raise serializers.ValidationError({
+                "detail": "No account found with this email.",
+                "code":   "NO_ACCOUNT",
+            })
+
+        if user.is_deleted:
+            raise serializers.ValidationError({
+                "detail": "This account has been deleted.",
+                "code":   "ACCOUNT_DELETED",
+            })
+
+        if not user.is_verified:
+            raise serializers.ValidationError({
+                "detail": (
+                    "Please verify your email address before logging in. "
+                    "Check your inbox for the verification link."
+                ),
+                "code":   "EMAIL_NOT_VERIFIED",
+            })
+
         if not user.is_active:
-            raise serializers.ValidationError("Account is inactive.")
+            raise serializers.ValidationError({
+                "detail": "This account is inactive.",
+                "code":   "ACCOUNT_INACTIVE",
+            })
+
         refresh = RefreshToken.for_user(user)
         return {
-            "refresh" : str(refresh),
-            "access"  : str(refresh.access_token),
-            "user_id" : user.id,
-            "email"   : user.email,
-            "role"    : user.role,
+            "refresh":     str(refresh),
+            "access":      str(refresh.access_token),
+            "user_id":     user.id,
+            "u_id":        user.id,
+            "email":       user.email,
+            "u_name":      user.u_name,
+            "name":        user.u_name,
+            "role":        user.role,
+            "is_verified": user.is_verified,
         }
+
+
+class VerifyEmailSerializer(serializers.Serializer):
+    """POST /api/auth/verify-email — body: { uid, token }"""
+    uid   = serializers.IntegerField()
+    token = serializers.CharField()
+
+    def validate(self, data):
+        try:
+            user = User.objects.get(id=data["uid"], is_deleted=False)
+        except User.DoesNotExist:
+            raise serializers.ValidationError({
+                "detail": "Invalid verification link.",
+                "code":   "USER_NOT_FOUND",
+            })
+
+        if not email_verification_token.check_token(user, data["token"]):
+            raise serializers.ValidationError({
+                "detail": (
+                    "This verification link is invalid or has expired. "
+                    "Please request a new one."
+                ),
+                "code":   "TOKEN_INVALID_OR_EXPIRED",
+            })
+
+        self.context["user"] = user
+        return data
+
+
+class ResendVerificationSerializer(serializers.Serializer):
+    """POST /api/auth/resend-verification — body: { email }"""
+    email = serializers.EmailField()
+
+    def validate_email(self, value):
+        # Never reveal whether the email exists — same response either way.
+        user = User.objects.filter(
+            email__iexact=value, is_deleted=False
+        ).first()
+        self.context["user"] = user
+        return value.lower()
 
 
 class UserSerializer(serializers.ModelSerializer):
@@ -50,7 +127,7 @@ class UserSerializer(serializers.ModelSerializer):
         model  = User
         fields = ["id", "u_name", "email", "role", "is_active",
                   "is_verified", "created_at", "updated_at"]
-        read_only_fields = ["u_id", "created_at", "updated_at"]
+        read_only_fields = ["id", "created_at", "updated_at", "is_verified"]
 
 
 # ─────────────────────────────────────────────
@@ -63,7 +140,8 @@ class TeamMemberSerializer(serializers.ModelSerializer):
     class Meta:
         model  = TeamMember
         fields = ["id", "name", "desc", "skills", "role", "added_by",
-                  "added_by_name", "qualitifcation", "experience", "updated_at", "is_deleted"]
+                  "added_by_name", "qualitifcation", "experience",
+                  "updated_at", "is_deleted"]
         read_only_fields = ["id", "updated_at", "added_by"]
 
     def create(self, validated_data):
@@ -94,22 +172,20 @@ class ProjectSerializer(serializers.ModelSerializer):
         request = self.context["request"]
         supervisors = validated_data.pop("supervisors", [])
 
-        # Current DB role values are "manager" (= Supervisor) and "member"
-        # (= Lead) — see User.ROLE_CHOICES. Both current and the eventual
-        # renamed values are checked here so this keeps working either way.
         is_lead = request.user.role in ("member", "lead")
         is_supervisor = request.user.role in ("manager", "supervisor")
 
         if is_lead and not supervisors:
             raise serializers.ValidationError({
-                "supervisors": "A Lead must select at least one Supervisor when creating a project."
+                "supervisors": (
+                    "A Lead must select at least one Supervisor "
+                    "when creating a project."
+                )
             })
 
         validated_data["created_by"] = request.user
         project = super().create(validated_data)
 
-        # Supervisor creating a project and picking no one -> becomes the
-        # supervisor themself by default.
         if not supervisors and is_supervisor:
             supervisors = [request.user]
 
@@ -118,13 +194,30 @@ class ProjectSerializer(serializers.ModelSerializer):
 
         return project
 
+    def update(self, instance, validated_data):
+        # Allow updating supervisors on PATCH too.
+        supervisors = validated_data.pop("supervisors", None)
+
+        instance = super().update(instance, validated_data)
+
+        if supervisors is not None:
+            instance.supervisors.set(supervisors)
+
+        return instance
+
 
 class ProjectListSerializer(serializers.ModelSerializer):
-    """Lightweight serializer for listing projects."""
+    supervisor_names = serializers.SerializerMethodField()
+
     class Meta:
         model  = Project
-        fields = ["p_id", "p_name","desc", "priority", "created_by", "supervisors",
-                  "deadline", "status", "created_at", "start_at", "updated_at","is_deleted"]
+        fields = ["p_id", "p_name", "desc", "priority", "created_by",
+                  "supervisors", "supervisor_names",
+                  "deadline", "status", "created_at", "start_at",
+                  "updated_at", "is_deleted"]
+
+    def get_supervisor_names(self, obj):
+        return [u.u_name for u in obj.supervisors.all()]
 
 
 # ─────────────────────────────────────────────
@@ -133,9 +226,9 @@ class ProjectListSerializer(serializers.ModelSerializer):
 
 class TaskSerializer(serializers.ModelSerializer):
     assign_to_name  = serializers.CharField(source="assign_to.name",  read_only=True)
-    assign_by_name  = serializers.CharField(source="assign_by.u_name",  read_only=True)
+    assign_by_name  = serializers.CharField(source="assign_by.u_name", read_only=True)
     created_by_name = serializers.CharField(source="created_by.u_name", read_only=True)
-    project_name    = serializers.CharField(source="p.p_name",          read_only=True)
+    project_name    = serializers.CharField(source="p.p_name",         read_only=True)
 
     class Meta:
         model  = Task
@@ -152,12 +245,12 @@ class TaskSerializer(serializers.ModelSerializer):
 
 
 class TaskListSerializer(serializers.ModelSerializer):
-    """Lightweight serializer for listing tasks."""
-    assign_to_name = serializers.CharField(source="assign_to.u_name", read_only=True)
+    assign_to_name = serializers.CharField(source="assign_to.name", read_only=True)
 
     class Meta:
         model  = Task
         fields = ["t_id", "title", "status", "priority", "due_date", "assign_to_name"]
+
 
 # ─────────────────────────────────────────────
 # Comment Serializers
@@ -188,16 +281,18 @@ class NotificationSerializer(serializers.ModelSerializer):
                   "read_at", "created_at", "is_deleted"]
         read_only_fields = ["n_id", "u", "read_at", "created_at"]
 
+
 class PTeamSerializer(serializers.ModelSerializer):
-    project_name = serializers.CharField(source="p.p_name",    read_only=True)
-    task_title   = serializers.CharField(source="t.title",     read_only=True)
-    member_name  = serializers.CharField(source="tm.name",     read_only=True)
+    project_name = serializers.CharField(source="p.p_name", read_only=True)
+    task_title   = serializers.CharField(source="t.title",  read_only=True)
+    member_name  = serializers.CharField(source="tm.name",  read_only=True)
 
     class Meta:
         model  = PTeam
         fields = ["pt_id", "p", "project_name", "t", "task_title",
                   "tm", "member_name"]
         read_only_fields = ["pt_id"]
+
 
 class ProjectStatsSerializer(serializers.Serializer):
     totalTasks      = serializers.IntegerField()
