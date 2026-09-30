@@ -210,6 +210,18 @@ class ResendVerificationView(APIView):
                 "a new link has been sent."
             )
         })
+
+class NotificationUnreadCountView(APIView):
+    """GET /api/notifications/unread-count"""
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        count = Notification.objects.filter(
+            u=request.user,
+            is_read=False,
+            is_deleted__isnull=True,
+        ).count()
+        return success({"count": count})
         
 class MeView(APIView):
     """GET /api/auth/me/  — current user profile"""

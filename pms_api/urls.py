@@ -29,7 +29,7 @@ from pms_app.views import (
     NotificationListView, NotificationDetailView,
     NotificationMarkReadView, NotificationDeleteView,
     NotificationMarkAllReadView, ProjectStatsView,
-    VerifyEmailView, ResendVerificationView,          # 🆕
+    VerifyEmailView, ResendVerificationView,NotificationUnreadCountView,
 )
 
 from rest_framework_simplejwt.views import (
@@ -62,16 +62,17 @@ urlpatterns = [
     path('api/comments/<c_id>/pin', CommentPinView.as_view(), name='CommentPinView'),
 
     path('api/notifications', NotificationListView.as_view(), name='NotificationListView'),
-    path('api/notifications/<n_id>', NotificationDetailView.as_view(), name='NotificationDetailView'),
-    path('api/notifications/<n_id>/read', NotificationMarkReadView.as_view(), name='NotificationMarkReadView'),
-
-    path('api/notifications/del/<n_id>', NotificationDeleteView.as_view(), name='NotificationDeleteView'),
-    path('api/notifications/<n_id>/read-all', NotificationMarkAllReadView.as_view(), name='NotificationMarkAllReadView'),
+path('api/notifications/read-all', NotificationMarkAllReadView.as_view(), name='NotificationMarkAllReadView'),
+path('api/notifications/unread-count', NotificationUnreadCountView.as_view(), name='NotificationUnreadCountView'),
+path('api/notifications/<n_id>', NotificationDetailView.as_view(), name='NotificationDetailView'),
+path('api/notifications/<n_id>/read', NotificationMarkReadView.as_view(), name='NotificationMarkReadView'),
+path('api/notifications/del/<n_id>', NotificationDeleteView.as_view(), name='NotificationDeleteView'),
 
     path("api/pteam",PTeamListCreateView.as_view(),name="pteam-list-create"),
     path("api/pteam/<pt_id>",PTeamDetailView.as_view(),name="pteam-detail"),
 
     path('api/projects/<p_id>/stats', ProjectStatsView.as_view(), name='project_stats'),
+    path('api/notifications/unread-count', NotificationUnreadCountView.as_view(), name='NotificationUnreadCountView'),
 
     path('api/auth/verify-email',        VerifyEmailView.as_view(),         name='auth_verify_email'),
     path('api/auth/resend-verification', ResendVerificationView.as_view(), name='auth_resend_verification'),
