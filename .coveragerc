@@ -1,0 +1,17 @@
+[run]
+source = pms_app
+omit =
+    */migrations/*
+    */tests/*
+    manage.py
+    pms_app/apps.py
+    pms_api/*
+
+[report]
+show_missing = True
+skip_covered = False
+precision = 1
+exclude_lines =
+    pragma: no cover
+    def __repr__
+    raise NotImplementedError
