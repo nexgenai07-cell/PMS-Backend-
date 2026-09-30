@@ -1,7 +1,80 @@
-# Create .gitignore and add:
-venv/
-__pycache__/
-*.pyc
-db.sqlite3
+# ─────────────────────────────────────────────
+# Environment & secrets
+# ─────────────────────────────────────────────
 .env
+.env.local
+.env.*.local
+*.env
+
+# ─────────────────────────────────────────────
+# Python
+# ─────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
 *.egg-info/
+.eggs/
+build/
+dist/
+
+# ─────────────────────────────────────────────
+# Virtual environments
+# ─────────────────────────────────────────────
+venv/
+env/
+ENV/
+.venv/
+env.bak/
+venv.bak/
+
+# ─────────────────────────────────────────────
+# Django
+# ─────────────────────────────────────────────
+db.sqlite3
+db.sqlite3-journal
+*.log
+local_settings.py
+staticfiles/
+media/
+
+# ─────────────────────────────────────────────
+# Testing & coverage
+# ─────────────────────────────────────────────
+.coverage
+.coverage.*
+htmlcov/
+.pytest_cache/
+.tox/
+coverage.xml
+*.cover
+.hypothesis/
+
+# ─────────────────────────────────────────────
+# Editors & IDEs
+# ─────────────────────────────────────────────
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+
+# ─────────────────────────────────────────────
+# Node (frontend, if colocated)
+# ─────────────────────────────────────────────
+node_modules/
+dist/
+.vite/
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+.pnpm-debug.log*
+
+# ─────────────────────────────────────────────
+# Frontend env
+# ─────────────────────────────────────────────
+.env
+.env.production
