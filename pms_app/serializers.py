@@ -276,12 +276,14 @@ class TaskListSerializer(serializers.ModelSerializer):
     """
     Lightweight task serializer for list views.
 
-    - We use SerializerMethodField for `assign_to_name` so the name is
-      always read fresh from the FK.
-    - We expose `assign_to` (TeamMember id) so the frontend can resolve
-      the assignee by id.
-    - We expose `p` (Project id) so the frontend can filter tasks by
-      project without an extra request per task.
+    Fields exposed:
+      - t_id, title, status, priority, due_date, progress  (task basics)
+      - p           → Project.id, so the frontend can filter by project
+      - assign_to   → TeamMember.id (the FK value)
+      - assign_to_name → resolved fresh from the FK on every read
+
+    We use SerializerMethodField for `assign_to_name` instead of
+    CharField(source="assign_to.name") so the name can't go stale.
     """
 
     assign_to_name = serializers.SerializerMethodField()
@@ -294,8 +296,8 @@ class TaskListSerializer(serializers.ModelSerializer):
             "status",
             "priority",
             "due_date",
-            "p",                 # ← NEW: project id
-            "assign_to",         # ← FK id
+            "p",                 # ← project id, needed by the frontend filter
+            "assign_to",         # ← TeamMember id
             "assign_to_name",
             "progress",
         ]
