@@ -388,27 +388,38 @@ class ProjectListCreateView(APIView):
 
         qs = Project.objects.filter(is_deleted=False)
 
-        # Role-based filtering
+        # Admins see everything
         if user.role == "admin":
-            # Admins see everything
-            pass
+            projects = qs.order_by("-created_at")
+            return success(ProjectListSerializer(projects, many=True).data)
 
-        elif user.role in ("manager", "supervisor"):
-            # Supervisors see: projects they supervise OR created
-            qs = qs.filter(
-                Q(supervisors=user) | Q(created_by=user)
-            ).distinct()
+        # ─────────────────────────────────────────────────────────
+        # Everyone else: visible if ANY of the following is true:
+        #   1. They created the project (created_by)
+        #   2. They are in project.supervisors M2M
+        #   3. They are linked via PTeam (i.e. added as a member/lead)
+        #
+        # #3 works by matching this user's TeamMember row(s) by name
+        # (there's no direct FK from TeamMember to User).
+        # ─────────────────────────────────────────────────────────
+        team_member_ids = list(
+            TeamMember.objects.filter(
+                name__iexact=user.u_name,
+                is_deleted=0,
+            ).values_list("id", flat=True)
+        )
 
-        elif user.role in ("member", "lead"):
-            # Leads see: projects they created OR supervise
-            qs = qs.filter(
-                Q(created_by=user) | Q(supervisors=user)
-            ).distinct()
+        member_project_ids = list(
+            PTeam.objects.filter(
+                tm_id__in=team_member_ids
+            ).values_list("p_id", flat=True).distinct()
+        )
 
-        else:
-            qs = qs.filter(
-                Q(created_by=user) | Q(supervisors=user)
-            ).distinct()
+        qs = qs.filter(
+            Q(supervisors=user) |
+            Q(created_by=user) |
+            Q(p_id__in=member_project_ids)
+        ).distinct()
 
         projects = qs.order_by("-created_at")
         return success(ProjectListSerializer(projects, many=True).data)
@@ -433,7 +444,6 @@ class ProjectDetailView(APIView):
 
         user = request.user
 
-        # Permission check
         if user.role == "admin":
             return project
 
@@ -443,7 +453,16 @@ class ProjectDetailView(APIView):
         if project.supervisors.filter(id=user.id).exists():
             return project
 
-        # Not authorized — pretend it doesn't exist
+        # Also allow access to members/leads linked via PTeam
+        team_member_ids = list(
+            TeamMember.objects.filter(
+                name__iexact=user.u_name,
+                is_deleted=0,
+            ).values_list("id", flat=True)
+        )
+        if PTeam.objects.filter(p=project, tm_id__in=team_member_ids).exists():
+            return project
+
         return None
 
     def get(self, request, p_id):
@@ -482,10 +501,19 @@ class ProjectTasksView(APIView):
             return error("Project not found.", status.HTTP_404_NOT_FOUND)
 
         user = request.user
+
+        team_member_ids = list(
+            TeamMember.objects.filter(
+                name__iexact=user.u_name,
+                is_deleted=0,
+            ).values_list("id", flat=True)
+        )
+
         authorized = (
             user.role == "admin" or
             project.created_by_id == user.id or
-            project.supervisors.filter(id=user.id).exists()
+            project.supervisors.filter(id=user.id).exists() or
+            PTeam.objects.filter(p=project, tm_id__in=team_member_ids).exists()
         )
         if not authorized:
             return error("Project not found.", status.HTTP_404_NOT_FOUND)
@@ -862,7 +890,6 @@ class TeamMemberStatsView(APIView):
 
         projects_count = pteam_entries.values("p").distinct().count()
 
-        # Average of real per-task progress (0-100).
         avg_progress = 0
         if total_tasks > 0:
             total_weight = sum((t.progress or 0) for t in tasks)
@@ -939,7 +966,6 @@ class UserStatsView(APIView):
             u__id=id, is_read=False, is_deleted__isnull=True
         ).count()
 
-        # Average of real per-task progress (0-100) for the user's assigned tasks.
         avg_progress = 0
         if total_tasks > 0:
             total_weight = sum((t.progress or 0) for t in assigned_tasks)
@@ -1012,7 +1038,6 @@ class ProjectTeamMemberStatsView(APIView):
                 if total_tasks > 0 else 0
             )
 
-            # Average of real per-task progress (0-100).
             avg_progress = 0
             if total_tasks > 0:
                 total_weight = sum((t.progress or 0) for t in tasks)
