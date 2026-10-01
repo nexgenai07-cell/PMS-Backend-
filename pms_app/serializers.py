@@ -276,15 +276,12 @@ class TaskListSerializer(serializers.ModelSerializer):
     """
     Lightweight task serializer for list views.
 
-    We use SerializerMethodField for `assign_to_name` (instead of
-    CharField(source="assign_to.name")) so the name is ALWAYS read
-    fresh from the FK on every request. CharField(source=...) caches
-    the string at serialization time, which led to stale names being
-    returned after a task was reassigned (e.g. showing "Admin" for a
-    task that's now assigned to "Alii").
-
-    We also expose `assign_to` (the FK id) so the frontend can
-    reconcile/override the name if needed.
+    - We use SerializerMethodField for `assign_to_name` so the name is
+      always read fresh from the FK.
+    - We expose `assign_to` (TeamMember id) so the frontend can resolve
+      the assignee by id.
+    - We expose `p` (Project id) so the frontend can filter tasks by
+      project without an extra request per task.
     """
 
     assign_to_name = serializers.SerializerMethodField()
@@ -297,14 +294,13 @@ class TaskListSerializer(serializers.ModelSerializer):
             "status",
             "priority",
             "due_date",
-            "assign_to",         # ← NEW: the FK id
+            "p",                 # ← NEW: project id
+            "assign_to",         # ← FK id
             "assign_to_name",
             "progress",
         ]
 
     def get_assign_to_name(self, obj):
-        # Always resolve the name from the related TeamMember on read.
-        # Never trust a cached value.
         if not obj.assign_to_id:
             return None
         try:
