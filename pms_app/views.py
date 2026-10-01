@@ -30,6 +30,7 @@ from .serializers import (
 def success(data, status_code=status.HTTP_200_OK):
     return Response({"success": True, "data": data}, status=status_code)
 
+
 def error(msg, status_code=status.HTTP_400_BAD_REQUEST):
     return Response({"success": False, "error": msg}, status=status_code)
 
@@ -62,7 +63,6 @@ def _send_verification_email(user, verification_link):
         "year":              timezone.now().year,
     }
 
-    # Render both templates
     text_body = render_to_string("pms_app/emails/verify_email.txt", context)
     html_body = render_to_string("pms_app/emails/verify_email.html", context)
 
@@ -91,8 +91,6 @@ class RegisterView(APIView):
 
         user = serializer.save()
 
-        # Build link + send email. If email fails, delete the user so they
-        # can retry with the same email.
         try:
             link = _build_verification_link(request, user)
             _send_verification_email(user, link)
@@ -122,33 +120,20 @@ class LoginView(APIView):
         if serializer.is_valid():
             return success(serializer.validated_data)
 
-        # -------------------------------------------------------------
-        # DRF wraps ValidationError payloads in arrays:
-        #   { "detail": ["..."], "code": ["..."] }
-        # Unwrap them so the response is a clean string.
-        # -------------------------------------------------------------
+        # DRF wraps ValidationError payloads in arrays — unwrap them
         errors = serializer.errors
         non_field = errors.get('non_field_errors')
 
         code = None
         detail = None
 
-        # Case 1: dict (new-style serializer)
         if isinstance(non_field, dict):
             raw_code = non_field.get('code')
             raw_detail = non_field.get('detail')
 
-            if isinstance(raw_code, list) and raw_code:
-                code = raw_code[0]
-            else:
-                code = raw_code
+            code = raw_code[0] if isinstance(raw_code, list) and raw_code else raw_code
+            detail = raw_detail[0] if isinstance(raw_detail, list) and raw_detail else raw_detail
 
-            if isinstance(raw_detail, list) and raw_detail:
-                detail = raw_detail[0]
-            else:
-                detail = raw_detail
-
-        # Case 2: list of strings (legacy serializer)
         elif isinstance(non_field, list) and non_field:
             first = non_field[0]
             if isinstance(first, dict):
@@ -159,15 +144,12 @@ class LoginView(APIView):
             else:
                 detail = first
 
-        # Fallback: 'detail'/'code' keys directly on errors dict
         if not code and isinstance(errors.get('detail'), list) and errors['detail']:
             detail = errors['detail'][0]
         if not code and isinstance(errors.get('code'), list) and errors['code']:
             code = errors['code'][0]
 
-        # -------------------------------------------------------------
         # 403 — Email not verified
-        # -------------------------------------------------------------
         if code == 'EMAIL_NOT_VERIFIED':
             return Response(
                 {
@@ -179,9 +161,7 @@ class LoginView(APIView):
                 status=status.HTTP_403_FORBIDDEN,
             )
 
-        # -------------------------------------------------------------
         # 401 — Auth failures
-        # -------------------------------------------------------------
         if code in ('INVALID_PASSWORD', 'NO_ACCOUNT',
                     'ACCOUNT_INACTIVE', 'ACCOUNT_DELETED'):
             return Response(
@@ -248,14 +228,13 @@ class ResendVerificationView(APIView):
 
         user = serializer.context.get("user")
 
-        # Always return success to prevent email enumeration.
-        # Only actually send if the user exists AND isn't verified.
+        # Never reveal whether the email exists — same response either way.
         if user and not user.is_verified and not user.is_deleted:
             try:
                 link = _build_verification_link(request, user)
                 _send_verification_email(user, link)
             except Exception:
-                pass  # swallow — don't leak whether the send worked
+                pass
 
         return success({
             "message": (
@@ -405,7 +384,33 @@ class ProjectListCreateView(APIView):
     permission_classes = [IsAuthenticated]
 
     def get(self, request):
-        projects = Project.objects.filter(is_deleted=False).order_by("-created_at")
+        user = request.user
+
+        qs = Project.objects.filter(is_deleted=False)
+
+        # Role-based filtering
+        if user.role == "admin":
+            # Admins see everything
+            pass
+
+        elif user.role in ("manager", "supervisor"):
+            # Supervisors see: projects they supervise OR created
+            qs = qs.filter(
+                Q(supervisors=user) | Q(created_by=user)
+            ).distinct()
+
+        elif user.role in ("member", "lead"):
+            # Leads see: projects they created OR supervise
+            qs = qs.filter(
+                Q(created_by=user) | Q(supervisors=user)
+            ).distinct()
+
+        else:
+            qs = qs.filter(
+                Q(created_by=user) | Q(supervisors=user)
+            ).distinct()
+
+        projects = qs.order_by("-created_at")
         return success(ProjectListSerializer(projects, many=True).data)
 
     def post(self, request):
@@ -420,20 +425,35 @@ class ProjectDetailView(APIView):
     """GET / PATCH / DELETE /api/projects/<p_id>/"""
     permission_classes = [IsAuthenticated]
 
-    def _get_project(self, p_id):
+    def _get_project(self, request, p_id):
         try:
-            return Project.objects.get(p_id=p_id, is_deleted=False)
+            project = Project.objects.get(p_id=p_id, is_deleted=False)
         except Project.DoesNotExist:
             return None
 
+        user = request.user
+
+        # Permission check
+        if user.role == "admin":
+            return project
+
+        if project.created_by_id == user.id:
+            return project
+
+        if project.supervisors.filter(id=user.id).exists():
+            return project
+
+        # Not authorized — pretend it doesn't exist
+        return None
+
     def get(self, request, p_id):
-        project = self._get_project(p_id)
+        project = self._get_project(request, p_id)
         if not project:
             return error("Project not found.", status.HTTP_404_NOT_FOUND)
         return success(ProjectSerializer(project).data)
 
     def patch(self, request, p_id):
-        project = self._get_project(p_id)
+        project = self._get_project(request, p_id)
         if not project:
             return error("Project not found.", status.HTTP_404_NOT_FOUND)
         serializer = ProjectSerializer(project, data=request.data, partial=True,
@@ -444,7 +464,7 @@ class ProjectDetailView(APIView):
         return error(serializer.errors)
 
     def delete(self, request, p_id):
-        project = self._get_project(p_id)
+        project = self._get_project(request, p_id)
         if not project:
             return error("Project not found.", status.HTTP_404_NOT_FOUND)
         project.soft_delete()
@@ -452,11 +472,27 @@ class ProjectDetailView(APIView):
 
 
 class ProjectTasksView(APIView):
-    """GET /api/projects/<p_id>/tasks/  — all tasks under a project"""
+    """GET /api/projects/<p_id>/tasks/"""
     permission_classes = [IsAuthenticated]
 
     def get(self, request, p_id):
-        tasks = Task.objects.filter(p__p_id=p_id, is_deleted=False).order_by("-created_at")
+        try:
+            project = Project.objects.get(p_id=p_id, is_deleted=False)
+        except Project.DoesNotExist:
+            return error("Project not found.", status.HTTP_404_NOT_FOUND)
+
+        user = request.user
+        authorized = (
+            user.role == "admin" or
+            project.created_by_id == user.id or
+            project.supervisors.filter(id=user.id).exists()
+        )
+        if not authorized:
+            return error("Project not found.", status.HTTP_404_NOT_FOUND)
+
+        tasks = Task.objects.filter(
+            p__p_id=p_id, is_deleted=False
+        ).order_by("-created_at")
         return success(TaskListSerializer(tasks, many=True).data)
 
 
@@ -547,7 +583,7 @@ class TaskListCreateView(APIView):
         if priority_filter:
             tasks = tasks.filter(priority=priority_filter)
         if assigned_to:
-            # TeamMember's PK is `id`, not `u_id` — fixed bug from tester report
+            # TeamMember's PK is `id`, not `u_id`
             tasks = tasks.filter(assign_to__id=assigned_to)
         if project_id:
             tasks = tasks.filter(p__p_id=project_id)
@@ -598,7 +634,7 @@ class TaskDetailView(APIView):
 
 
 class TaskCommentsView(APIView):
-    """GET /api/tasks/<t_id>/comments/  — all comments on a task"""
+    """GET /api/tasks/<t_id>/comments/"""
     permission_classes = [IsAuthenticated]
 
     def get(self, request, t_id):
