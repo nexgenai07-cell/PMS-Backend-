@@ -31,28 +31,35 @@ class LoginSerializer(serializers.Serializer):
     password = serializers.CharField(write_only=True)
 
     def validate(self, data):
-        user = authenticate(username=data["email"], password=data["password"])
+        email    = (data["email"] or "").strip().lower()
+        password = data["password"]
 
-        if not user:
-            # Distinguish "no account" from "wrong password" for better UX
-            if User.objects.filter(
-                email__iexact=data["email"], is_deleted=False
-            ).exists():
-                raise serializers.ValidationError({
-                    "detail": "Incorrect password.",
-                    "code":   "INVALID_PASSWORD",
-                })
+        # -------------------------------------------------------------
+        # Manually fetch user + check password.
+        #
+        # We do NOT use Django's authenticate() here because its default
+        # ModelBackend returns None for is_active=False users — which
+        # would make an unverified user look like a wrong password.
+        # -------------------------------------------------------------
+        try:
+            user = User.objects.get(email__iexact=email, is_deleted=False)
+        except User.DoesNotExist:
             raise serializers.ValidationError({
                 "detail": "No account found with this email.",
                 "code":   "NO_ACCOUNT",
             })
 
-        if user.is_deleted:
+        if not user.check_password(password):
             raise serializers.ValidationError({
-                "detail": "This account has been deleted.",
-                "code":   "ACCOUNT_DELETED",
+                "detail": "Incorrect password.",
+                "code":   "INVALID_PASSWORD",
             })
 
+        # -------------------------------------------------------------
+        # Now that password is confirmed correct, check account state.
+        # Order matters: unverified is more informative than inactive,
+        # so check is_verified BEFORE is_active.
+        # -------------------------------------------------------------
         if not user.is_verified:
             raise serializers.ValidationError({
                 "detail": (
@@ -68,6 +75,9 @@ class LoginSerializer(serializers.Serializer):
                 "code":   "ACCOUNT_INACTIVE",
             })
 
+        # -------------------------------------------------------------
+        # All checks passed — issue tokens
+        # -------------------------------------------------------------
         refresh = RefreshToken.for_user(user)
         return {
             "refresh":     str(refresh),
@@ -84,12 +94,25 @@ class LoginSerializer(serializers.Serializer):
 
 class VerifyEmailSerializer(serializers.Serializer):
     """POST /api/auth/verify-email — body: { uid, token }"""
-    uid   = serializers.IntegerField()
+    uid   = serializers.CharField()   # base64 string, decoded in validate()
     token = serializers.CharField()
 
     def validate(self, data):
+        from django.utils.http import urlsafe_base64_decode
+        from django.utils.encoding import force_str
+
+        # Decode the base64 uid back to an integer
         try:
-            user = User.objects.get(id=data["uid"], is_deleted=False)
+            decoded = force_str(urlsafe_base64_decode(data["uid"]))
+            user_id = int(decoded)
+        except (TypeError, ValueError, OverflowError):
+            raise serializers.ValidationError({
+                "detail": "Invalid verification link.",
+                "code":   "INVALID_UID",
+            })
+
+        try:
+            user = User.objects.get(id=user_id, is_deleted=False)
         except User.DoesNotExist:
             raise serializers.ValidationError({
                 "detail": "Invalid verification link.",
@@ -195,7 +218,8 @@ class ProjectSerializer(serializers.ModelSerializer):
         return project
 
     def update(self, instance, validated_data):
-        # Allow updating supervisors on PATCH too.
+        # Allow updating supervisors on PATCH too — fixes Issue #7
+        # (supervisor not saved when editing an existing project).
         supervisors = validated_data.pop("supervisors", None)
 
         instance = super().update(instance, validated_data)

@@ -5,18 +5,22 @@ from rest_framework.views import APIView
 from rest_framework.response import Response
 from rest_framework.permissions import IsAuthenticated, AllowAny
 from rest_framework_simplejwt.tokens import RefreshToken
-from django.core.mail import send_mail
+
+from django.core.mail import EmailMultiAlternatives
 from django.conf import settings
 from django.utils.http import urlsafe_base64_encode
 from django.utils.encoding import force_bytes
+from django.template.loader import render_to_string
+
 from .tokens import email_verification_token
 from .serializers import VerifyEmailSerializer, ResendVerificationSerializer
 
 from .models import User, TeamMember, Project, Task, Comment, Notification, PTeam
 from .serializers import (
-    RegisterSerializer, LoginSerializer, UserSerializer,TeamMemberSerializer, ProjectSerializer, ProjectListSerializer,TaskSerializer,TaskListSerializer, CommentSerializer, NotificationSerializer, PTeamSerializer, ProjectStatsSerializer
+    RegisterSerializer, LoginSerializer, UserSerializer, TeamMemberSerializer,
+    ProjectSerializer, ProjectListSerializer, TaskSerializer, TaskListSerializer,
+    CommentSerializer, NotificationSerializer, PTeamSerializer, ProjectStatsSerializer
 )
-
 
 
 # ─────────────────────────────────────────────
@@ -28,6 +32,7 @@ def success(data, status_code=status.HTTP_200_OK):
 
 def error(msg, status_code=status.HTTP_400_BAD_REQUEST):
     return Response({"success": False, "error": msg}, status=status_code)
+
 
 # ─────────────────────────────────────────────
 # Email verification helpers
@@ -42,24 +47,34 @@ def _build_verification_link(request, user):
 
 
 def _send_verification_email(user, verification_link):
-    """Send the verification email using Django's configured backend."""
+    """
+    Send the verification email with HTML + plain-text versions.
+
+    Templates live in:
+        pms_app/templates/pms_app/emails/verify_email.html
+        pms_app/templates/pms_app/emails/verify_email.txt
+    """
     subject = "Verify your AEEL-PMS account"
-    message = (
-        f"Hi {user.u_name},\n\n"
-        f"Thanks for registering with AEEL-PMS.\n\n"
-        f"Please click the link below to verify your email address. "
-        f"This link expires in 24 hours.\n\n"
-        f"{verification_link}\n\n"
-        f"If you didn't create this account, you can safely ignore this email.\n\n"
-        f"— The AEEL-PMS Team"
-    )
-    send_mail(
+
+    context = {
+        "user_name":         user.u_name,
+        "verification_link": verification_link,
+        "year":              timezone.now().year,
+    }
+
+    # Render both templates
+    text_body = render_to_string("pms_app/emails/verify_email.txt", context)
+    html_body = render_to_string("pms_app/emails/verify_email.html", context)
+
+    msg = EmailMultiAlternatives(
         subject=subject,
-        message=message,
+        body=text_body,
         from_email=settings.DEFAULT_FROM_EMAIL,
-        recipient_list=[user.email],
-        fail_silently=False,
+        to=[user.email],
     )
+    msg.attach_alternative(html_body, "text/html")
+    msg.send(fail_silently=False)
+
 
 # ═══════════════════════════════════════════════════════════════
 # AUTH VIEWS
@@ -107,18 +122,52 @@ class LoginView(APIView):
         if serializer.is_valid():
             return success(serializer.validated_data)
 
-        # Inspect error code so we can return 403 for email-not-verified
+        # -------------------------------------------------------------
+        # DRF wraps ValidationError payloads in arrays:
+        #   { "detail": ["..."], "code": ["..."] }
+        # Unwrap them so the response is a clean string.
+        # -------------------------------------------------------------
         errors = serializer.errors
         non_field = errors.get('non_field_errors')
 
         code = None
         detail = None
-        if isinstance(non_field, dict):
-            code   = non_field.get('code')
-            detail = non_field.get('detail')
-        elif isinstance(non_field, list) and non_field:
-            detail = non_field[0]
 
+        # Case 1: dict (new-style serializer)
+        if isinstance(non_field, dict):
+            raw_code = non_field.get('code')
+            raw_detail = non_field.get('detail')
+
+            if isinstance(raw_code, list) and raw_code:
+                code = raw_code[0]
+            else:
+                code = raw_code
+
+            if isinstance(raw_detail, list) and raw_detail:
+                detail = raw_detail[0]
+            else:
+                detail = raw_detail
+
+        # Case 2: list of strings (legacy serializer)
+        elif isinstance(non_field, list) and non_field:
+            first = non_field[0]
+            if isinstance(first, dict):
+                raw_code = first.get('code')
+                raw_detail = first.get('detail')
+                code = raw_code[0] if isinstance(raw_code, list) else raw_code
+                detail = raw_detail[0] if isinstance(raw_detail, list) else raw_detail
+            else:
+                detail = first
+
+        # Fallback: 'detail'/'code' keys directly on errors dict
+        if not code and isinstance(errors.get('detail'), list) and errors['detail']:
+            detail = errors['detail'][0]
+        if not code and isinstance(errors.get('code'), list) and errors['code']:
+            code = errors['code'][0]
+
+        # -------------------------------------------------------------
+        # 403 — Email not verified
+        # -------------------------------------------------------------
         if code == 'EMAIL_NOT_VERIFIED':
             return Response(
                 {
@@ -130,8 +179,11 @@ class LoginView(APIView):
                 status=status.HTTP_403_FORBIDDEN,
             )
 
-        if code in ('INVALID_PASSWORD', 'NO_ACCOUNT', 'ACCOUNT_INACTIVE',
-                    'ACCOUNT_DELETED'):
+        # -------------------------------------------------------------
+        # 401 — Auth failures
+        # -------------------------------------------------------------
+        if code in ('INVALID_PASSWORD', 'NO_ACCOUNT',
+                    'ACCOUNT_INACTIVE', 'ACCOUNT_DELETED'):
             return Response(
                 {
                     "success": False,
@@ -156,6 +208,7 @@ class LogoutView(APIView):
             return success({"message": "Logged out successfully."})
         except Exception as e:
             return error(str(e))
+
 
 class VerifyEmailView(APIView):
     """POST /api/auth/verify-email/  — body: { uid, token }"""
@@ -211,6 +264,7 @@ class ResendVerificationView(APIView):
             )
         })
 
+
 class NotificationUnreadCountView(APIView):
     """GET /api/notifications/unread-count"""
     permission_classes = [IsAuthenticated]
@@ -222,7 +276,8 @@ class NotificationUnreadCountView(APIView):
             is_deleted__isnull=True,
         ).count()
         return success({"count": count})
-        
+
+
 class MeView(APIView):
     """GET /api/auth/me/  — current user profile"""
     permission_classes = [IsAuthenticated]
@@ -284,6 +339,7 @@ class UserDetailView(APIView):
         user.soft_delete()
         return success({"message": "User deleted."})
 
+
 # ═══════════════════════════════════════════════════════════════
 # TEAM MEMBER VIEWS
 # ═══════════════════════════════════════════════════════════════
@@ -338,6 +394,7 @@ class TeamMemberDetailView(APIView):
         member.is_deleted = 1
         member.save()
         return success({"message": "Team member deleted."})
+
 
 # ═══════════════════════════════════════════════════════════════
 # PROJECT VIEWS
@@ -408,13 +465,11 @@ class ProjectStatsView(APIView):
     permission_classes = [IsAuthenticated]
 
     def get(self, request, p_id):
-        # get project
         try:
             project = Project.objects.get(p_id=p_id, is_deleted=False)
         except Project.DoesNotExist:
             return error("Project not found.", status.HTTP_404_NOT_FOUND)
 
-        # get all tasks for this project
         tasks = Task.objects.filter(p__p_id=p_id, is_deleted=False)
 
         total_tasks       = tasks.count()
@@ -422,13 +477,11 @@ class ProjectStatsView(APIView):
         in_progress_tasks = tasks.filter(status="in_progress").count()
         todo_tasks        = tasks.filter(status="todo").count()
 
-        # completion rate
         completion_rate = (
             round((completed_tasks / total_tasks) * 100, 1)
             if total_tasks > 0 else 0
         )
 
-        # on time rate — tasks completed before due date
         now = timezone.now()
         tasks_with_due = tasks.filter(due_date__isnull=False)
         on_time_tasks  = tasks_with_due.filter(
@@ -440,12 +493,10 @@ class ProjectStatsView(APIView):
             if tasks_with_due.count() > 0 else 0
         )
 
-        # members count via PTeam
         members_count = PTeam.objects.filter(
             p__p_id=p_id
         ).values("tm").distinct().count()
 
-        # avg progress — weight each status
         STATUS_WEIGHT = {
             "todo":        0,
             "in_progress": 50,
@@ -475,6 +526,7 @@ class ProjectStatsView(APIView):
         serializer = ProjectStatsSerializer(data)
         return success(serializer.data)
 
+
 # ═══════════════════════════════════════════════════════════════
 # TASK VIEWS
 # ═══════════════════════════════════════════════════════════════
@@ -485,7 +537,6 @@ class TaskListCreateView(APIView):
 
     def get(self, request):
         tasks = Task.objects.filter(is_deleted=False).order_by("-created_at")
-        # Optional filters via query params
         status_filter   = request.query_params.get("status")
         priority_filter = request.query_params.get("priority")
         assigned_to     = request.query_params.get("assign_to")
@@ -496,7 +547,8 @@ class TaskListCreateView(APIView):
         if priority_filter:
             tasks = tasks.filter(priority=priority_filter)
         if assigned_to:
-            tasks = tasks.filter(assign_to__u_id=assigned_to)
+            # TeamMember's PK is `id`, not `u_id` — fixed bug from tester report
+            tasks = tasks.filter(assign_to__id=assigned_to)
         if project_id:
             tasks = tasks.filter(p__p_id=project_id)
 
@@ -552,6 +604,7 @@ class TaskCommentsView(APIView):
     def get(self, request, t_id):
         comments = Comment.objects.filter(t__t_id=t_id).order_by("-created_at")
         return success(CommentSerializer(comments, many=True).data)
+
 
 # ═══════════════════════════════════════════════════════════════
 # COMMENT VIEWS
@@ -691,6 +744,7 @@ class NotificationDeleteView(APIView):
         notification.save()
         return success({"message": "Notification deleted."})
 
+
 # ═══════════════════════════════════════════════════════════════
 # P_TEAM VIEWS
 # ═══════════════════════════════════════════════════════════════
@@ -752,10 +806,8 @@ class TeamMemberStatsView(APIView):
         except TeamMember.DoesNotExist:
             return error("Team member not found.", status.HTTP_404_NOT_FOUND)
 
-        # ✅ fixed — filter by tm (TeamMember FK), not pt_id
         pteam_entries = PTeam.objects.filter(tm__id=id)
 
-        # task IDs assigned to this member
         task_ids = pteam_entries.values_list("t__t_id", flat=True)
         tasks    = Task.objects.filter(t_id__in=task_ids, is_deleted=False)
 
@@ -766,13 +818,11 @@ class TeamMemberStatsView(APIView):
         review_tasks      = tasks.filter(status="review").count()
         cancelled_tasks   = tasks.filter(status="cancelled").count()
 
-        # completion rate
         completion_rate = (
             round((completed_tasks / total_tasks) * 100, 1)
             if total_tasks > 0 else 0
         )
 
-        # on time rate
         now            = timezone.now()
         tasks_with_due = tasks.filter(due_date__isnull=False)
         on_time_tasks  = tasks_with_due.filter(
@@ -783,10 +833,8 @@ class TeamMemberStatsView(APIView):
             if tasks_with_due.count() > 0 else 0
         )
 
-        # projects this member is part of
         projects_count = pteam_entries.values("p").distinct().count()
 
-        # avg progress
         STATUS_WEIGHT = {
             "todo": 0, "in_progress": 50,
             "review": 75, "done": 100, "cancelled": 0,
@@ -820,14 +868,13 @@ class UserStatsView(APIView):
     """GET /api/users/<id>/stats/"""
     permission_classes = [IsAuthenticated]
 
-    def get(self, request, id):                              # ✅ u_id → id
+    def get(self, request, id):
         try:
-            user = User.objects.get(id=id, is_deleted=False) # ✅ u_id → id
+            user = User.objects.get(id=id, is_deleted=False)
         except User.DoesNotExist:
             return error("User not found.", status.HTTP_404_NOT_FOUND)
 
-        # tasks assigned to this user
-        assigned_tasks    = Task.objects.filter(assign_to__id=id, is_deleted=False)   # ✅
+        assigned_tasks    = Task.objects.filter(assign_to__id=id, is_deleted=False)
         total_tasks       = assigned_tasks.count()
         completed_tasks   = assigned_tasks.filter(status="done").count()
         in_progress_tasks = assigned_tasks.filter(status="in_progress").count()
@@ -835,31 +882,25 @@ class UserStatsView(APIView):
         review_tasks      = assigned_tasks.filter(status="review").count()
         cancelled_tasks   = assigned_tasks.filter(status="cancelled").count()
 
-        # tasks created by this user
         created_tasks = Task.objects.filter(
-            created_by__id=id, is_deleted=False                                        # ✅
+            created_by__id=id, is_deleted=False
         ).count()
 
-        # tasks assigned by this user to others
         assigned_by_tasks = Task.objects.filter(
-            assign_by__id=id, is_deleted=False                                         # ✅
+            assign_by__id=id, is_deleted=False
         ).count()
 
-        # projects created by this user
         projects_created = Project.objects.filter(
-            created_by__id=id, is_deleted=False                                        # ✅
+            created_by__id=id, is_deleted=False
         ).count()
 
-        # comments made by this user
-        comments_count = Comment.objects.filter(u__id=id).count()                     # ✅
+        comments_count = Comment.objects.filter(u__id=id).count()
 
-        # completion rate
         completion_rate = (
             round((completed_tasks / total_tasks) * 100, 1)
             if total_tasks > 0 else 0
         )
 
-        # on time rate
         now            = timezone.now()
         tasks_with_due = assigned_tasks.filter(due_date__isnull=False)
         on_time_tasks  = tasks_with_due.filter(
@@ -870,12 +911,10 @@ class UserStatsView(APIView):
             if tasks_with_due.count() > 0 else 0
         )
 
-        # unread notifications
         unread_notifications = Notification.objects.filter(
-            u__id=id, is_read=False, is_deleted__isnull=True                          # ✅
+            u__id=id, is_read=False, is_deleted__isnull=True
         ).count()
 
-        # avg progress
         STATUS_WEIGHT = {
             "todo": 0, "in_progress": 50,
             "review": 75, "done": 100, "cancelled": 0,
@@ -917,18 +956,16 @@ class ProjectTeamMemberStatsView(APIView):
     """GET /api/projects/<p_id>/members/stats/"""
     permission_classes = [IsAuthenticated]
 
-    def get(self, request, p_id):                            # ✅ p_id stays same
+    def get(self, request, p_id):
         try:
-            project = Project.objects.get(p_id=p_id, is_deleted=False)  # ✅
+            project = Project.objects.get(p_id=p_id, is_deleted=False)
         except Project.DoesNotExist:
             return error("Project not found.", status.HTTP_404_NOT_FOUND)
 
-        # get all unique members in this project
         pteam_entries = PTeam.objects.filter(
-            p__p_id=p_id                                                  # ✅
+            p__p_id=p_id
         ).select_related("tm").distinct()
 
-        # ✅ fixed — tm uses default id not Tm_id
         member_ids = pteam_entries.values_list(
             "tm__id", flat=True
         ).distinct()
@@ -942,13 +979,12 @@ class ProjectTeamMemberStatsView(APIView):
 
         for tm_id in member_ids:
             try:
-                member = TeamMember.objects.get(id=tm_id)                # ✅
+                member = TeamMember.objects.get(id=tm_id)
             except TeamMember.DoesNotExist:
                 continue
 
-            # tasks for this member in this project
             task_ids = PTeam.objects.filter(
-                p__p_id=p_id, tm__id=tm_id                               # ✅
+                p__p_id=p_id, tm__id=tm_id
             ).values_list("t__t_id", flat=True)
 
             tasks             = Task.objects.filter(t_id__in=task_ids, is_deleted=False)
@@ -957,13 +993,11 @@ class ProjectTeamMemberStatsView(APIView):
             in_progress_tasks = tasks.filter(status="in_progress").count()
             todo_tasks        = tasks.filter(status="todo").count()
 
-            # completion rate
             completion_rate = (
                 round((completed_tasks / total_tasks) * 100, 1)
                 if total_tasks > 0 else 0
             )
 
-            # avg progress
             avg_progress = 0
             if total_tasks > 0:
                 total_weight = sum(
@@ -972,7 +1006,7 @@ class ProjectTeamMemberStatsView(APIView):
                 avg_progress = round(total_weight / total_tasks, 1)
 
             members_stats.append({
-                "id":              member.id,                             # ✅
+                "id":              member.id,
                 "memberName":      member.name,
                 "role":            member.role,
                 "skills":          member.skills,

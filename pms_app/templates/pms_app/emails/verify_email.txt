@@ -1,0 +1,13 @@
+Hi {{ user_name }},
+
+Welcome to AEEL-PMS!
+
+Please confirm your email address by clicking the link below:
+
+{{ verification_link }}
+
+This link will expire in 24 hours. If it expires, you can request a new one from the login page.
+
+If you didn't create this account, you can safely ignore this email.
+
+— The AEEL-PMS Team
