@@ -127,19 +127,13 @@ PASSWORD_RESET_TIMEOUT = 86400
 # ─────────────────────────────────────────────
 # CORS — frontend origins allowed to call this API
 # ─────────────────────────────────────────────
-# Comma-separated in env var (no spaces). Includes localhost + Vercel frontend.
 CORS_ALLOWED_ORIGINS = [
-    o.strip() for o in os.environ.get(
-        'CORS_ALLOWED_ORIGINS',
-        'http://localhost:5173,http://localhost:3000,'
-        'https://pms-frontend.vercel.app,'
-        'https://aeel-pms.vercel.app'
-    ).split(',') if o.strip()
+    "http://localhost:5173",
+    "http://localhost:5174",          
+    "http://127.0.0.1:5173",
+    "http://127.0.0.1:5174",         
+    "https://project-management-system-pms-xi.vercel.app",
 ]
-
-# Only for dev — remove this in prod once you know the exact origins.
-if DEBUG:
-    CORS_ALLOW_ALL_ORIGINS = True
 
 CORS_ALLOW_CREDENTIALS = True
 
@@ -157,20 +151,18 @@ CORS_ALLOW_HEADERS = [
 
 
 # ─────────────────────────────────────────────
-# CSRF — required because Vercel proxies with HTTPS
+# CSRF — trusted origins (required behind Vercel proxy)
 # ─────────────────────────────────────────────
 CSRF_TRUSTED_ORIGINS = [
-    o.strip() for o in os.environ.get(
-        'CSRF_TRUSTED_ORIGINS',
-        'http://localhost:5173,http://localhost:3000,'
-        'https://pms-backend-fawn-pi.vercel.app,'
-        'https://pms-frontend.vercel.app,'
-        'https://aeel-pms.vercel.app'
-    ).split(',') if o.strip()
+    "http://localhost:5173",
+    "http://localhost:5174",          
+    "http://127.0.0.1:5173",
+    "http://127.0.0.1:5174",         
+    "https://pms-backend-fawn-pi.vercel.app",
+    "https://project-management-system-pms-xi.vercel.app",
 ]
 
-# Vercel serves over HTTPS but forwards HTTP internally — this tells Django
-# to trust the X-Forwarded-Proto header.
+# Tell Django to trust Vercel's X-Forwarded-Proto header
 SECURE_PROXY_SSL_HEADER = ('HTTP_X_FORWARDED_PROTO', 'https')
 
 # Only require HTTPS redirects in prod (breaks local dev otherwise)
