@@ -29,7 +29,7 @@ from pms_app.views import (
     NotificationListView, NotificationDetailView,
     NotificationMarkReadView, NotificationDeleteView,
     NotificationMarkAllReadView, ProjectStatsView,
-    VerifyEmailView, ResendVerificationView,NotificationUnreadCountView,
+    VerifyEmailView, ResendVerificationView,NotificationUnreadCountView,LeadStatsView ,
 )
 
 from rest_framework_simplejwt.views import (
@@ -81,18 +81,7 @@ path('api/notifications/del/<n_id>', NotificationDeleteView.as_view(), name='Not
     path('api/team-members/<id>/stats',TeamMemberStatsView.as_view(),name='team_member_stats'),
     path('api/users/<id>/stats',UserStatsView.as_view(),name='user_stats'),
     path('api/projects/<p_id>/members/stats',   ProjectTeamMemberStatsView.as_view(), name='project_team_stats'),
-
-
-
-
-    
-
-
-    
-
-
-
-
+ path('api/leads/stats/', LeadStatsView.as_view(), name='leads_stats'),
     # path("api-auth/", include("rest_framework.urls"))
     # path("api/", include("pms_app.urls")),
 

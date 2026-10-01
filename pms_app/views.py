@@ -1063,3 +1063,214 @@ class ProjectTeamMemberStatsView(APIView):
             "membersStats": members_stats,
         }
         return success(data)
+
+
+# ═══════════════════════════════════════════════════════════════
+# NEW: LEAD STATS  GET /api/leads/stats/
+# ═══════════════════════════════════════════════════════════════
+#
+# Returns aggregated stats for every "lead-ish" user (roles: member,
+# developer, or anything containing "lead"), computed server-side.
+#
+# Why server-side? Because TeamMember has NO FK to User — the only
+# reliable link is matching by name. Doing this join in a single pass
+# on the backend avoids the frontend having to fetch 5 endpoints and
+# reconstruct the graph client-side, which is error-prone and slow.
+#
+# A lead's "scope" is the union of:
+#   1. Projects they created (Project.created_by)
+#   2. Projects they supervise (Project.supervisors M2M)
+#   3. Projects where their TeamMember (matched by name) appears in
+#      a PTeam entry
+#
+# A lead's tasks = tasks inside those projects, PLUS tasks directly
+# assigned to the lead's TeamMember profile (via Task.assign_to).
+# ═══════════════════════════════════════════════════════════════
+
+class LeadStatsView(APIView):
+    """GET /api/leads/stats/"""
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        # ─── 1. Load all relevant data ───────────────────────────
+        leads = User.objects.filter(
+            is_deleted=False,
+            role__in=['member', 'developer', 'lead'],
+        )
+
+        projects = list(
+            Project.objects
+                .filter(is_deleted=False)
+                .prefetch_related('supervisors')
+        )
+        project_by_id = {p.p_id: p for p in projects}
+
+        tasks = list(Task.objects.filter(is_deleted=False))
+        task_by_id = {t.t_id: t for t in tasks}
+
+        team_members = list(TeamMember.objects.filter(is_deleted=0))
+
+        pteam_entries = list(
+            PTeam.objects.select_related('p', 't', 'tm').all()
+        )
+
+        # ─── 2. Build lookup maps ────────────────────────────────
+        # Name → TeamMember (lowercase, trimmed). First match wins.
+        tm_by_name = {}
+        for tm in team_members:
+            key = (tm.name or '').lower().strip()
+            if key and key not in tm_by_name:
+                tm_by_name[key] = tm
+
+        # user_id → projects created by them
+        projects_by_creator = {}
+        for p in projects:
+            if p.created_by_id:
+                projects_by_creator.setdefault(p.created_by_id, []).append(p)
+
+        # user_id → projects where they're a supervisor
+        projects_by_supervisor = {}
+        for p in projects:
+            for u in p.supervisors.all():
+                projects_by_supervisor.setdefault(u.id, []).append(p)
+
+        # TeamMember.id → set of project IDs (via PTeam.p)
+        tm_project_ids = {}
+        # TeamMember.id → set of task IDs (via PTeam.t)
+        tm_pteam_task_ids = {}
+        for entry in pteam_entries:
+            if entry.tm_id is None:
+                continue
+            tm_id = entry.tm_id
+            if entry.p_id is not None:
+                tm_project_ids.setdefault(tm_id, set()).add(entry.p_id)
+            if entry.t_id is not None:
+                tm_pteam_task_ids.setdefault(tm_id, set()).add(entry.t_id)
+
+        # TeamMember.id → set of task IDs (via Task.assign_to)
+        tasks_by_assignee = {}
+        for t in tasks:
+            if t.assign_to_id is not None:
+                tasks_by_assignee.setdefault(t.assign_to_id, set()).add(t.t_id)
+
+        # ─── 3. Compute stats per lead ───────────────────────────
+        results = []
+
+        for user in leads:
+            user_id = user.id
+
+            # 3a. Projects from each source
+            created_projects   = projects_by_creator.get(user_id, [])
+            supervised_projects = projects_by_supervisor.get(user_id, [])
+
+            # 3b. Projects via TeamMember + PTeam (matched by name)
+            key = (user.u_name or '').lower().strip()
+            member = tm_by_name.get(key)
+            pteam_projects = []
+            if member is not None:
+                pids = tm_project_ids.get(member.id, set())
+                pteam_projects = [project_by_id[pid] for pid in pids if pid in project_by_id]
+
+            # 3c. Deduped project list
+            project_map = {}
+            for p in created_projects + supervised_projects + pteam_projects:
+                project_map[p.p_id] = p
+            lead_projects = list(project_map.values())
+            lead_project_ids = set(p.p_id for p in lead_projects)
+
+            # 3d. Tasks inside those projects
+            project_tasks = [t for t in tasks if t.p_id in lead_project_ids]
+
+            # 3e. Tasks directly assigned to this lead's TeamMember
+            direct_task_ids = set()
+            if member is not None:
+                direct_task_ids |= tasks_by_assignee.get(member.id, set())
+                direct_task_ids |= tm_pteam_task_ids.get(member.id, set())
+            direct_tasks = [task_by_id[tid] for tid in direct_task_ids if tid in task_by_id]
+
+            # 3f. Combine & dedupe
+            task_map = {}
+            for t in project_tasks + direct_tasks:
+                task_map[t.t_id] = t
+            all_tasks = list(task_map.values())
+
+            # 3g. Compute totals
+            total       = len(all_tasks)
+            completed   = sum(1 for t in all_tasks if t.status in ('done', 'completed'))
+            in_progress = sum(1 for t in all_tasks if t.status in ('in_progress', 'review'))
+            todo        = sum(1 for t in all_tasks if t.status in ('todo', 'pending', 'planning'))
+
+            completion_rate = round((completed / total) * 100, 1) if total else 0
+
+            # 3h. Average progress (mirrors ProjectStatsView logic)
+            avg_progress = 0
+            if total:
+                total_prog = 0
+                for t in all_tasks:
+                    if t.progress is not None:
+                        total_prog += t.progress
+                    elif t.status in ('done', 'completed'):
+                        total_prog += 100
+                    elif t.status == 'review':
+                        total_prog += 75
+                    elif t.status == 'in_progress':
+                        total_prog += 50
+                avg_progress = round(total_prog / total, 1)
+
+            # 3i. On-time rate
+            completed_with_due = [
+                t for t in all_tasks
+                if t.status in ('done', 'completed') and t.due_date
+            ]
+            on_time = sum(
+                1 for t in completed_with_due
+                if t.update_last and t.due_date and t.update_last <= t.due_date
+            )
+            on_time_rate = (
+                round((on_time / len(completed_with_due)) * 100, 1)
+                if completed_with_due else 0
+            )
+
+            # 3j. Team size (unique assignees across the lead's projects)
+            member_ids = set()
+            for t in project_tasks:
+                if t.assign_to_id is not None:
+                    member_ids.add(t.assign_to_id)
+
+            # 3k. Serialize projects (only the fields the UI needs)
+            projects_payload = [
+                {
+                    'p_id':     p.p_id,
+                    'p_name':   p.p_name,
+                    'desc':     p.desc,
+                    'status':   p.status,
+                    'priority': p.priority,
+                }
+                for p in lead_projects
+            ]
+
+            results.append({
+                'userId':              user_id,
+                'u_name':              user.u_name,
+                'email':               user.email,
+                'role':                user.role,
+                'hasTeamMember':       member is not None,
+                'teamMemberId':        member.id if member else None,
+                'projects':            projects_payload,
+                'projectCount':        len(lead_projects),
+                'totalTasks':          total,
+                'completedTasks':      completed,
+                'inProgressTasks':     in_progress,
+                'todoTasks':           todo,
+                'completionRate':      completion_rate,
+                'avgProgress':         avg_progress,
+                'onTimeRate':          on_time_rate,
+                'hasCompletedWithDue': len(completed_with_due) > 0,
+                'teamSize':            len(member_ids),
+                'directAssignedCount': len(direct_tasks),
+            })
+
+        # ─── 4. Sort by completion rate desc, then name ──────────
+        results.sort(key=lambda r: (-r['completionRate'], (r['u_name'] or '').lower()))
+
+        return success(results)
