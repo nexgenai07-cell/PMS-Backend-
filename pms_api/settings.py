@@ -118,7 +118,7 @@ DEFAULT_FROM_EMAIL = os.environ.get(
 )
 
 # Frontend URL — used to build verification links
-FRONTEND_URL = os.environ.get('FRONTEND_URL', 'http://localhost:5173')
+FRONTEND_URL = os.environ.get('FRONTEND_URL', 'http://localhost:5174')
 
 # 24-hour expiry for email verification tokens
 PASSWORD_RESET_TIMEOUT = 86400
