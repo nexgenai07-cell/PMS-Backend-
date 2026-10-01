@@ -41,7 +41,7 @@ class User(AbstractBaseUser, PermissionsMixin):
     id        = models.AutoField(primary_key=True)
     u_name      = models.CharField(max_length=150)
     email       = models.EmailField(unique=True)
-    role        = models.CharField(max_length=50, choices=ROLE_CHOICES, default="Lead")
+    role        = models.CharField(max_length=50, choices=ROLE_CHOICES, default="member")
     is_active   = models.BooleanField(default=False)   # activated after email verification
     is_verified = models.BooleanField(default=False)
     created_at  = models.DateTimeField(auto_now_add=True)
@@ -67,9 +67,8 @@ class User(AbstractBaseUser, PermissionsMixin):
         self.is_deleted = True
         self.save()
 
-    @property
-    def id(self):
-        return self.id
+    # NOTE: Do NOT redefine `id` as a @property. The AutoField above
+    # already provides `self.id`; a property shadowing it recurses forever.
 
 
 # ─────────────────────────────────────────────
@@ -104,6 +103,7 @@ class TeamMember(models.Model):
 
     def __str__(self):
         return self.name
+
 
 # ─────────────────────────────────────────────
 # Projects
@@ -167,6 +167,7 @@ class Project(models.Model):
     def soft_delete(self):
         self.is_deleted = True
         self.save()
+
 
 # ─────────────────────────────────────────────
 # Tasks
@@ -234,7 +235,7 @@ class Task(models.Model):
     update_last = models.DateTimeField(auto_now=True)
     is_deleted  = models.BooleanField(default=False)
 
-    # 👇 ADD THIS — same indentation as the fields above (4 spaces)
+    # Real per-task completion percentage (0-100). Stored, not derived from status.
     progress = models.PositiveSmallIntegerField(
         default=0,
         help_text="Percent complete, 0-100",
@@ -250,7 +251,8 @@ class Task(models.Model):
     def soft_delete(self):
         self.is_deleted = True
         self.save()
-        
+
+
 # ─────────────────────────────────────────────
 # Comments
 # ─────────────────────────────────────────────

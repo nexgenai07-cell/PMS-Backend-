@@ -536,10 +536,7 @@ class ProjectStatsView(APIView):
         # Average of real per-task progress (0-100).
         avg_progress = 0
         if total_tasks > 0:
-            total_weight = sum(
-                (t.progress or 0)
-                for t in tasks
-            )
+            total_weight = sum((t.progress or 0) for t in tasks)
             avg_progress = round(total_weight / total_tasks, 1)
 
         data = {
@@ -868,10 +865,7 @@ class TeamMemberStatsView(APIView):
         # Average of real per-task progress (0-100).
         avg_progress = 0
         if total_tasks > 0:
-            total_weight = sum(
-                (t.progress or 0)
-                for t in tasks
-            )
+            total_weight = sum((t.progress or 0) for t in tasks)
             avg_progress = round(total_weight / total_tasks, 1)
 
         data = {
@@ -948,10 +942,7 @@ class UserStatsView(APIView):
         # Average of real per-task progress (0-100) for the user's assigned tasks.
         avg_progress = 0
         if total_tasks > 0:
-            total_weight = sum(
-                (t.progress or 0)
-                for t in assigned_tasks
-            )
+            total_weight = sum((t.progress or 0) for t in assigned_tasks)
             avg_progress = round(total_weight / total_tasks, 1)
 
         data = {
@@ -1024,10 +1015,7 @@ class ProjectTeamMemberStatsView(APIView):
             # Average of real per-task progress (0-100).
             avg_progress = 0
             if total_tasks > 0:
-                total_weight = sum(
-                    (t.progress or 0)
-                    for t in tasks
-                )
+                total_weight = sum((t.progress or 0) for t in tasks)
                 avg_progress = round(total_weight / total_tasks, 1)
 
             members_stats.append({
