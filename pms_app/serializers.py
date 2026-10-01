@@ -258,7 +258,7 @@ class TaskSerializer(serializers.ModelSerializer):
         model  = Task
         fields = ["t_id", "title", "desc", "status", "assign_to", "assign_to_name",
                   "assign_by", "assign_by_name", "created_by", "created_by_name",
-                  "created_at", "p", "project_name", "priority", "due_date",
+                  "created_at", "p", "project_name","progress", "priority", "due_date",
                   "start_date", "update_last", "is_deleted"]
         read_only_fields = ["t_id", "created_by", "assign_by", "created_at", "update_last"]
 
@@ -270,10 +270,11 @@ class TaskSerializer(serializers.ModelSerializer):
 
 class TaskListSerializer(serializers.ModelSerializer):
     assign_to_name = serializers.CharField(source="assign_to.name", read_only=True)
-
+    progress = serializers.IntegerField(min_value=0, max_value=100, required=False, default=0)
     class Meta:
-        model  = Task
-        fields = ["t_id", "title", "status", "priority", "due_date", "assign_to_name"]
+        model = Task
+        fields = ["t_id", "title", "status", "priority", "due_date",
+                  "assign_to_name", "progress"]  # ← add progress
 
 
 # ─────────────────────────────────────────────

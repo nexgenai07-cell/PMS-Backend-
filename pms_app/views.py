@@ -533,17 +533,11 @@ class ProjectStatsView(APIView):
             p__p_id=p_id
         ).values("tm").distinct().count()
 
-        STATUS_WEIGHT = {
-            "todo":        0,
-            "in_progress": 50,
-            "review":      75,
-            "done":        100,
-            "cancelled":   0,
-        }
+        # Average of real per-task progress (0-100).
         avg_progress = 0
         if total_tasks > 0:
             total_weight = sum(
-                STATUS_WEIGHT.get(t.status, 0)
+                (t.progress or 0)
                 for t in tasks
             )
             avg_progress = round(total_weight / total_tasks, 1)
@@ -871,13 +865,13 @@ class TeamMemberStatsView(APIView):
 
         projects_count = pteam_entries.values("p").distinct().count()
 
-        STATUS_WEIGHT = {
-            "todo": 0, "in_progress": 50,
-            "review": 75, "done": 100, "cancelled": 0,
-        }
+        # Average of real per-task progress (0-100).
         avg_progress = 0
         if total_tasks > 0:
-            total_weight = sum(STATUS_WEIGHT.get(t.status, 0) for t in tasks)
+            total_weight = sum(
+                (t.progress or 0)
+                for t in tasks
+            )
             avg_progress = round(total_weight / total_tasks, 1)
 
         data = {
@@ -951,14 +945,12 @@ class UserStatsView(APIView):
             u__id=id, is_read=False, is_deleted__isnull=True
         ).count()
 
-        STATUS_WEIGHT = {
-            "todo": 0, "in_progress": 50,
-            "review": 75, "done": 100, "cancelled": 0,
-        }
+        # Average of real per-task progress (0-100) for the user's assigned tasks.
         avg_progress = 0
         if total_tasks > 0:
             total_weight = sum(
-                STATUS_WEIGHT.get(t.status, 0) for t in assigned_tasks
+                (t.progress or 0)
+                for t in assigned_tasks
             )
             avg_progress = round(total_weight / total_tasks, 1)
 
@@ -1008,11 +1000,6 @@ class ProjectTeamMemberStatsView(APIView):
 
         members_stats = []
 
-        STATUS_WEIGHT = {
-            "todo": 0, "in_progress": 50,
-            "review": 75, "done": 100, "cancelled": 0,
-        }
-
         for tm_id in member_ids:
             try:
                 member = TeamMember.objects.get(id=tm_id)
@@ -1034,10 +1021,12 @@ class ProjectTeamMemberStatsView(APIView):
                 if total_tasks > 0 else 0
             )
 
+            # Average of real per-task progress (0-100).
             avg_progress = 0
             if total_tasks > 0:
                 total_weight = sum(
-                    STATUS_WEIGHT.get(t.status, 0) for t in tasks
+                    (t.progress or 0)
+                    for t in tasks
                 )
                 avg_progress = round(total_weight / total_tasks, 1)
 

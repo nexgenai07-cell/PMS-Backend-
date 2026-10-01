@@ -234,6 +234,12 @@ class Task(models.Model):
     update_last = models.DateTimeField(auto_now=True)
     is_deleted  = models.BooleanField(default=False)
 
+    # 👇 ADD THIS — same indentation as the fields above (4 spaces)
+    progress = models.PositiveSmallIntegerField(
+        default=0,
+        help_text="Percent complete, 0-100",
+    )
+
     class Meta:
         db_table = "tasks"
         verbose_name = "Task"
@@ -244,7 +250,7 @@ class Task(models.Model):
     def soft_delete(self):
         self.is_deleted = True
         self.save()
-
+        
 # ─────────────────────────────────────────────
 # Comments
 # ─────────────────────────────────────────────
