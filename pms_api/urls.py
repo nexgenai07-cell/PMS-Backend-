@@ -52,6 +52,7 @@ urlpatterns = [
     path('api/projects', ProjectListCreateView.as_view(), name='project_list_CR'),
     path('api/projects/<p_id>', ProjectDetailView.as_view(), name='project_details_view_UD'),
     path('api/projects/<p_id>/tasks', ProjectTasksView.as_view(), name='ProjectTasksView'),
+    path('api/auth/resend-verification', ResendVerificationView.as_view(), name='auth_resend_verification'),
 
     path('api/task', TaskListCreateView.as_view(), name='Create Task View'),
     path('api/task/<t_id>', TaskDetailView.as_view(), name='TaskDetailView'),
