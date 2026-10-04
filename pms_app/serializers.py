@@ -347,6 +347,7 @@ class TaskListSerializer(serializers.ModelSerializer):
             "subtask_count",
             "completed_subtasks",
             "progress",
+            "desc",
         ]
 
     def get_assign_to_name(self, obj):
