@@ -67,9 +67,6 @@ class User(AbstractBaseUser, PermissionsMixin):
         self.is_deleted = True
         self.save()
 
-    # NOTE: Do NOT redefine `id` as a @property. The AutoField above
-    # already provides `self.id`; a property shadowing it recurses forever.
-
 
 # ─────────────────────────────────────────────
 # Team Members
@@ -178,6 +175,10 @@ class Task(models.Model):
     Task entity. Maps to 'Tasks' in the ERD.
     assign_to / assign_by / created_by all reference User.
     p_id references Project.
+
+    NEW:
+      - `assignees` : M2M with TeamMember — supports multiple assignees per task.
+      - `parent`    : self-FK — lets a task have subtasks.
     """
     PRIORITY_CHOICES = [
         ("low", "Low"),
@@ -198,6 +199,11 @@ class Task(models.Model):
     title      = models.CharField(max_length=255)
     desc       = models.TextField(blank=True, null=True)
     status     = models.CharField(max_length=50, choices=STATUS_CHOICES, default="todo")
+
+    # Legacy single-assignee FK. Kept for backward compatibility — the primary
+    # source of truth for multi-assign is `assignees` (M2M below). When a task
+    # is saved with a single assignee, `assign_to` is auto-synced to the first
+    # one so older code paths still work.
     assign_to  = models.ForeignKey(
                      TeamMember,
                      on_delete=models.SET_NULL,
@@ -206,6 +212,7 @@ class Task(models.Model):
                      related_name="assigned_tasks",
                      db_column="assign_to"
                  )
+
     assign_by  = models.ForeignKey(
                      User,
                      on_delete=models.SET_NULL,
@@ -239,6 +246,22 @@ class Task(models.Model):
     progress = models.PositiveSmallIntegerField(
         default=0,
         help_text="Percent complete, 0-100",
+    )
+
+    # NEW: multiple assignees (in addition to the legacy single `assign_to`).
+    assignees = models.ManyToManyField(
+        TeamMember,
+        related_name="multi_assigned_tasks",
+        blank=True,
+    )
+
+    # NEW: subtasks — a task may have a parent task.
+    parent = models.ForeignKey(
+        "self",
+        on_delete=models.CASCADE,
+        null=True,
+        blank=True,
+        related_name="subtasks",
     )
 
     class Meta:
@@ -343,11 +366,6 @@ class PTeam(models.Model):
     """
     Junction table linking Projects, Tasks, and Team Members.
     Maps to 'P_Team' in the ERD.
-
-    Relationships (from ERD labels):
-      - 'Member of'  → User  ↔  Project  (via p_id)
-      - 'Has'        → Task  ↔  P_Team   (via t_id)
-      - 'Member of'  → TeamMember ↔ P_Team (via tm_id)
     """
     pt_id  = models.AutoField(primary_key=True)
     p      = models.ForeignKey(

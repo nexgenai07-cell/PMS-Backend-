@@ -40,7 +40,6 @@ def error(msg, status_code=status.HTTP_400_BAD_REQUEST):
 # ─────────────────────────────────────────────
 
 def _build_verification_link(request, user):
-    """Build the frontend verification URL with uid + token."""
     uid   = urlsafe_base64_encode(force_bytes(user.id))
     token = email_verification_token.make_token(user)
     base  = getattr(settings, 'FRONTEND_URL', 'http://localhost:5173').rstrip('/')
@@ -48,21 +47,12 @@ def _build_verification_link(request, user):
 
 
 def _send_verification_email(user, verification_link):
-    """
-    Send the verification email with HTML + plain-text versions.
-
-    Templates live in:
-        pms_app/templates/pms_app/emails/verify_email.html
-        pms_app/templates/pms_app/emails/verify_email.txt
-    """
     subject = "Verify your AEEL-PMS account"
-
     context = {
         "user_name":         user.u_name,
         "verification_link": verification_link,
         "year":              timezone.now().year,
     }
-
     text_body = render_to_string("pms_app/emails/verify_email.txt", context)
     html_body = render_to_string("pms_app/emails/verify_email.html", context)
 
@@ -120,7 +110,6 @@ class LoginView(APIView):
         if serializer.is_valid():
             return success(serializer.validated_data)
 
-        # DRF wraps ValidationError payloads in arrays — unwrap them
         errors = serializer.errors
         non_field = errors.get('non_field_errors')
 
@@ -130,7 +119,6 @@ class LoginView(APIView):
         if isinstance(non_field, dict):
             raw_code = non_field.get('code')
             raw_detail = non_field.get('detail')
-
             code = raw_code[0] if isinstance(raw_code, list) and raw_code else raw_code
             detail = raw_detail[0] if isinstance(raw_detail, list) and raw_detail else raw_detail
 
@@ -149,7 +137,6 @@ class LoginView(APIView):
         if not code and isinstance(errors.get('code'), list) and errors['code']:
             code = errors['code'][0]
 
-        # 403 — Email not verified
         if code == 'EMAIL_NOT_VERIFIED':
             return Response(
                 {
@@ -161,7 +148,6 @@ class LoginView(APIView):
                 status=status.HTTP_403_FORBIDDEN,
             )
 
-        # 401 — Auth failures
         if code in ('INVALID_PASSWORD', 'NO_ACCOUNT',
                     'ACCOUNT_INACTIVE', 'ACCOUNT_DELETED'):
             return Response(
@@ -178,7 +164,7 @@ class LoginView(APIView):
 
 
 class LogoutView(APIView):
-    """POST /api/auth/logout/  — blacklists the refresh token"""
+    """POST /api/auth/logout/"""
     permission_classes = [IsAuthenticated]
 
     def post(self, request):
@@ -191,7 +177,7 @@ class LogoutView(APIView):
 
 
 class VerifyEmailView(APIView):
-    """POST /api/auth/verify-email/  — body: { uid, token }"""
+    """POST /api/auth/verify-email/"""
     permission_classes = [AllowAny]
 
     def post(self, request):
@@ -218,7 +204,7 @@ class VerifyEmailView(APIView):
 
 
 class ResendVerificationView(APIView):
-    """POST /api/auth/resend-verification/  — body: { email }"""
+    """POST /api/auth/resend-verification/"""
     permission_classes = [AllowAny]
 
     def post(self, request):
@@ -228,7 +214,6 @@ class ResendVerificationView(APIView):
 
         user = serializer.context.get("user")
 
-        # Never reveal whether the email exists — same response either way.
         if user and not user.is_verified and not user.is_deleted:
             try:
                 link = _build_verification_link(request, user)
@@ -258,7 +243,7 @@ class NotificationUnreadCountView(APIView):
 
 
 class MeView(APIView):
-    """GET /api/auth/me/  — current user profile"""
+    """GET /api/auth/me/"""
     permission_classes = [IsAuthenticated]
 
     def get(self, request):
@@ -385,23 +370,12 @@ class ProjectListCreateView(APIView):
 
     def get(self, request):
         user = request.user
-
         qs = Project.objects.filter(is_deleted=False)
 
-        # Admins see everything
         if user.role == "admin":
             projects = qs.order_by("-created_at")
             return success(ProjectListSerializer(projects, many=True).data)
 
-        # ─────────────────────────────────────────────────────────
-        # Everyone else: visible if ANY of the following is true:
-        #   1. They created the project (created_by)
-        #   2. They are in project.supervisors M2M
-        #   3. They are linked via PTeam (i.e. added as a member/lead)
-        #
-        # #3 works by matching this user's TeamMember row(s) by name
-        # (there's no direct FK from TeamMember to User).
-        # ─────────────────────────────────────────────────────────
         team_member_ids = list(
             TeamMember.objects.filter(
                 name__iexact=user.u_name,
@@ -446,14 +420,11 @@ class ProjectDetailView(APIView):
 
         if user.role == "admin":
             return project
-
         if project.created_by_id == user.id:
             return project
-
         if project.supervisors.filter(id=user.id).exists():
             return project
 
-        # Also allow access to members/leads linked via PTeam
         team_member_ids = list(
             TeamMember.objects.filter(
                 name__iexact=user.u_name,
@@ -501,7 +472,6 @@ class ProjectTasksView(APIView):
             return error("Project not found.", status.HTTP_404_NOT_FOUND)
 
         user = request.user
-
         team_member_ids = list(
             TeamMember.objects.filter(
                 name__iexact=user.u_name,
@@ -518,8 +488,9 @@ class ProjectTasksView(APIView):
         if not authorized:
             return error("Project not found.", status.HTTP_404_NOT_FOUND)
 
+        # Only top-level tasks appear in the project task list.
         tasks = Task.objects.filter(
-            p__p_id=p_id, is_deleted=False
+            p__p_id=p_id, is_deleted=False, parent__isnull=True
         ).order_by("-created_at")
         return success(TaskListSerializer(tasks, many=True).data)
 
@@ -534,6 +505,7 @@ class ProjectStatsView(APIView):
         except Project.DoesNotExist:
             return error("Project not found.", status.HTTP_404_NOT_FOUND)
 
+        # Stats include subtasks — they represent real work items.
         tasks = Task.objects.filter(p__p_id=p_id, is_deleted=False)
 
         total_tasks       = tasks.count()
@@ -561,7 +533,6 @@ class ProjectStatsView(APIView):
             p__p_id=p_id
         ).values("tm").distinct().count()
 
-        # Average of real per-task progress (0-100).
         avg_progress = 0
         if total_tasks > 0:
             total_weight = sum((t.progress or 0) for t in tasks)
@@ -587,23 +558,41 @@ class ProjectStatsView(APIView):
 # ═══════════════════════════════════════════════════════════════
 
 class TaskListCreateView(APIView):
-    """GET /api/tasks/   POST /api/tasks/"""
+    """GET /api/task   POST /api/task"""
     permission_classes = [IsAuthenticated]
 
     def get(self, request):
         tasks = Task.objects.filter(is_deleted=False).order_by("-created_at")
+
         status_filter   = request.query_params.get("status")
         priority_filter = request.query_params.get("priority")
         assigned_to     = request.query_params.get("assign_to")
         project_id      = request.query_params.get("project")
+        parent_param    = request.query_params.get("parent")
+
+        # By default, only top-level tasks (no parent). Pass
+        # ?parent=<task_id> to fetch subtasks of a specific task, or
+        # ?parent=null for all top-level tasks.
+        if parent_param is not None:
+            if parent_param in ("", "null", "none"):
+                tasks = tasks.filter(parent__isnull=True)
+            else:
+                try:
+                    tasks = tasks.filter(parent_id=int(parent_param))
+                except (ValueError, TypeError):
+                    tasks = tasks.filter(parent__isnull=True)
+        else:
+            tasks = tasks.filter(parent__isnull=True)
 
         if status_filter:
             tasks = tasks.filter(status=status_filter)
         if priority_filter:
             tasks = tasks.filter(priority=priority_filter)
         if assigned_to:
-            # TeamMember's PK is `id`, not `u_id`
-            tasks = tasks.filter(assign_to__id=assigned_to)
+            # Match either the M2M assignees or the legacy assign_to FK.
+            tasks = tasks.filter(
+                Q(assignees__id=assigned_to) | Q(assign_to__id=assigned_to)
+            ).distinct()
         if project_id:
             tasks = tasks.filter(p__p_id=project_id)
 
@@ -618,7 +607,7 @@ class TaskListCreateView(APIView):
 
 
 class TaskDetailView(APIView):
-    """GET / PATCH / DELETE /api/tasks/<t_id>/"""
+    """GET / PATCH / DELETE /api/task/<t_id>/"""
     permission_classes = [IsAuthenticated]
 
     def _get_task(self, t_id):
@@ -650,6 +639,36 @@ class TaskDetailView(APIView):
             return error("Task not found.", status.HTTP_404_NOT_FOUND)
         task.soft_delete()
         return success({"message": "Task deleted."})
+
+
+class TaskSubtasksView(APIView):
+    """GET /api/task/<t_id>/subtasks   POST /api/task/<t_id>/subtasks"""
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request, t_id):
+        try:
+            parent = Task.objects.get(t_id=t_id, is_deleted=False)
+        except Task.DoesNotExist:
+            return error("Task not found.", status.HTTP_404_NOT_FOUND)
+
+        subs = parent.subtasks.filter(is_deleted=False).order_by("-created_at")
+        return success(TaskSerializer(subs, many=True).data)
+
+    def post(self, request, t_id):
+        try:
+            parent = Task.objects.get(t_id=t_id, is_deleted=False)
+        except Task.DoesNotExist:
+            return error("Task not found.", status.HTTP_404_NOT_FOUND)
+
+        data = request.data.copy()
+        data["p"]      = parent.p_id
+        data["parent"] = parent.t_id
+
+        serializer = TaskSerializer(data=data, context={"request": request})
+        if serializer.is_valid():
+            sub = serializer.save()
+            return success(TaskSerializer(sub).data, status.HTTP_201_CREATED)
+        return error(serializer.errors)
 
 
 class TaskCommentsView(APIView):
@@ -721,7 +740,7 @@ class CommentDetailView(APIView):
 
 
 class CommentPinView(APIView):
-    """PATCH /api/comments/<c_id>/pin/  — toggle pin"""
+    """PATCH /api/comments/<c_id>/pin/"""
     permission_classes = [IsAuthenticated]
 
     def patch(self, request, c_id):
@@ -739,7 +758,7 @@ class CommentPinView(APIView):
 # ═══════════════════════════════════════════════════════════════
 
 class NotificationListView(APIView):
-    """GET /api/notifications/  — current user's notifications"""
+    """GET /api/notifications/"""
     permission_classes = [IsAuthenticated]
 
     def get(self, request):
@@ -848,7 +867,7 @@ class PTeamDetailView(APIView):
 
 
 # ═══════════════════════════════════════════════════════════════
-# MEMBER STATS  GET /api/team-members/<id>/stats/
+# MEMBER STATS
 # ═══════════════════════════════════════════════════════════════
 
 class TeamMemberStatsView(APIView):
@@ -861,10 +880,13 @@ class TeamMemberStatsView(APIView):
         except TeamMember.DoesNotExist:
             return error("Team member not found.", status.HTTP_404_NOT_FOUND)
 
-        pteam_entries = PTeam.objects.filter(tm__id=id)
+        # Combine M2M + legacy single assignee tasks for this member.
+        tasks = Task.objects.filter(
+            Q(assignees__id=id) | Q(assign_to__id=id),
+            is_deleted=False,
+        ).distinct()
 
-        task_ids = pteam_entries.values_list("t__t_id", flat=True)
-        tasks    = Task.objects.filter(t_id__in=task_ids, is_deleted=False)
+        pteam_entries = PTeam.objects.filter(tm__id=id)
 
         total_tasks       = tasks.count()
         completed_tasks   = tasks.filter(status="done").count()
@@ -912,7 +934,7 @@ class TeamMemberStatsView(APIView):
 
 
 # ═══════════════════════════════════════════════════════════════
-# USER STATS  GET /api/users/<id>/stats/
+# USER STATS
 # ═══════════════════════════════════════════════════════════════
 
 class UserStatsView(APIView):
@@ -925,7 +947,19 @@ class UserStatsView(APIView):
         except User.DoesNotExist:
             return error("User not found.", status.HTTP_404_NOT_FOUND)
 
-        assigned_tasks    = Task.objects.filter(assign_to__id=id, is_deleted=False)
+        # Personal scope: any task where this user's TeamMember profile
+        # appears as a (multi-)assignee.
+        tm_ids = list(
+            TeamMember.objects.filter(
+                name__iexact=user.u_name,
+                is_deleted=0,
+            ).values_list("id", flat=True)
+        )
+        assigned_tasks = Task.objects.filter(
+            Q(assignees__id__in=tm_ids) | Q(assign_to__id__in=tm_ids),
+            is_deleted=False,
+        ).distinct()
+
         total_tasks       = assigned_tasks.count()
         completed_tasks   = assigned_tasks.filter(status="done").count()
         in_progress_tasks = assigned_tasks.filter(status="in_progress").count()
@@ -994,7 +1028,7 @@ class UserStatsView(APIView):
 
 
 # ═══════════════════════════════════════════════════════════════
-# PROJECT TEAM MEMBER STATS  GET /api/projects/<p_id>/members/stats/
+# PROJECT TEAM MEMBER STATS
 # ═══════════════════════════════════════════════════════════════
 
 class ProjectTeamMemberStatsView(APIView):
@@ -1023,11 +1057,12 @@ class ProjectTeamMemberStatsView(APIView):
             except TeamMember.DoesNotExist:
                 continue
 
-            task_ids = PTeam.objects.filter(
-                p__p_id=p_id, tm__id=tm_id
-            ).values_list("t__t_id", flat=True)
+            tasks = Task.objects.filter(
+                Q(assignees__id=tm_id) | Q(assign_to__id=tm_id),
+                p__p_id=p_id,
+                is_deleted=False,
+            ).distinct()
 
-            tasks             = Task.objects.filter(t_id__in=task_ids, is_deleted=False)
             total_tasks       = tasks.count()
             completed_tasks   = tasks.filter(status="done").count()
             in_progress_tasks = tasks.filter(status="in_progress").count()
@@ -1068,35 +1103,13 @@ class ProjectTeamMemberStatsView(APIView):
 # ═══════════════════════════════════════════════════════════════
 # LEAD STATS  GET /api/leads/stats/
 # ═══════════════════════════════════════════════════════════════
-#
-# Returns aggregated stats for every "lead-ish" user (roles: member,
-# developer, or anything containing "lead"), computed server-side.
-#
-# Two SCOPES are computed for every lead:
-#
-#   1. PROJECT SCOPE  (team outcome)
-#      Union of all tasks inside every project the lead owns, supervises,
-#      or is a member of. This answers "how healthy is the lead's
-#      portfolio?" — not "how much work did the lead personally do?"
-#
-#   2. PERSONAL SCOPE (individual contribution)
-#      Tasks where the lead is the assignee — either directly via
-#      Task.assign_to, or via a PTeam row that links the lead's
-#      TeamMember profile to a specific task. This answers "how much
-#      work did this lead personally do?"
-#
-# Both scopes are returned with the same shape so the frontend can show
-# them side by side without special-casing either.
-# ═══════════════════════════════════════════════════════════════
 
 class LeadStatsView(APIView):
     """GET /api/leads/stats/"""
     permission_classes = [IsAuthenticated]
 
-    # ─── Helpers ───────────────────────────────────────────
     @staticmethod
     def _compute_task_stats(tasks):
-        """Given a list of Task objects, return aggregate metrics."""
         total = len(tasks)
         completed   = sum(1 for t in tasks if t.status in ('done', 'completed'))
         in_progress = sum(1 for t in tasks if t.status in ('in_progress', 'review'))
@@ -1143,7 +1156,6 @@ class LeadStatsView(APIView):
         }
 
     def get(self, request):
-        # ─── 1. Load all relevant data ───────────────────────────
         leads = User.objects.filter(
             is_deleted=False,
             role__in=['member', 'developer', 'lead'],
@@ -1165,29 +1177,23 @@ class LeadStatsView(APIView):
             PTeam.objects.select_related('p', 't', 'tm').all()
         )
 
-        # ─── 2. Build lookup maps ────────────────────────────────
-        # Name → TeamMember (lowercase, trimmed). First match wins.
         tm_by_name = {}
         for tm in team_members:
             key = (tm.name or '').lower().strip()
             if key and key not in tm_by_name:
                 tm_by_name[key] = tm
 
-        # user_id → projects created by them
         projects_by_creator = {}
         for p in projects:
             if p.created_by_id:
                 projects_by_creator.setdefault(p.created_by_id, []).append(p)
 
-        # user_id → projects where they're a supervisor
         projects_by_supervisor = {}
         for p in projects:
             for u in p.supervisors.all():
                 projects_by_supervisor.setdefault(u.id, []).append(p)
 
-        # TeamMember.id → set of project IDs (via PTeam.p)
         tm_project_ids = {}
-        # TeamMember.id → set of task IDs (via PTeam.t)
         tm_pteam_task_ids = {}
         for entry in pteam_entries:
             if entry.tm_id is None:
@@ -1198,23 +1204,22 @@ class LeadStatsView(APIView):
             if entry.t_id is not None:
                 tm_pteam_task_ids.setdefault(tm_id, set()).add(entry.t_id)
 
-        # TeamMember.id → set of task IDs (via Task.assign_to)
+        # NEW: multi-assign aware — tasks_by_assignee now includes M2M.
         tasks_by_assignee = {}
         for t in tasks:
             if t.assign_to_id is not None:
                 tasks_by_assignee.setdefault(t.assign_to_id, set()).add(t.t_id)
+            for tm in t.assignees.all():
+                tasks_by_assignee.setdefault(tm.id, set()).add(t.t_id)
 
-        # ─── 3. Compute stats per lead ───────────────────────────
         results = []
 
         for user in leads:
             user_id = user.id
 
-            # 3a. Projects from each source
             created_projects    = projects_by_creator.get(user_id, [])
             supervised_projects = projects_by_supervisor.get(user_id, [])
 
-            # 3b. Projects via TeamMember + PTeam (matched by name)
             key = (user.u_name or '').lower().strip()
             member = tm_by_name.get(key)
             pteam_projects = []
@@ -1222,18 +1227,14 @@ class LeadStatsView(APIView):
                 pids = tm_project_ids.get(member.id, set())
                 pteam_projects = [project_by_id[pid] for pid in pids if pid in project_by_id]
 
-            # 3c. Deduped project list (project scope)
             project_map = {}
             for p in created_projects + supervised_projects + pteam_projects:
                 project_map[p.p_id] = p
             lead_projects = list(project_map.values())
             lead_project_ids = set(p.p_id for p in lead_projects)
 
-            # 3d. PROJECT SCOPE tasks = everything inside the lead's projects
             project_tasks = [t for t in tasks if t.p_id in lead_project_ids]
 
-            # 3e. PERSONAL SCOPE tasks = assigned to the lead's TeamMember
-            #     (via Task.assign_to OR via PTeam.t link)
             personal_task_ids = set()
             if member is not None:
                 personal_task_ids |= tasks_by_assignee.get(member.id, set())
@@ -1243,17 +1244,16 @@ class LeadStatsView(APIView):
                 if tid in task_by_id
             ]
 
-            # 3f. Compute stats for both scopes
             project_stats  = self._compute_task_stats(project_tasks)
             personal_stats = self._compute_task_stats(personal_tasks)
 
-            # 3g. Team size — unique assignees across the lead's projects
             member_ids = set()
             for t in project_tasks:
                 if t.assign_to_id is not None:
                     member_ids.add(t.assign_to_id)
+                for tm in t.assignees.all():
+                    member_ids.add(tm.id)
 
-            # 3h. Serialize projects (only the fields the UI needs)
             projects_payload = [
                 {
                     'p_id':     p.p_id,
@@ -1266,7 +1266,6 @@ class LeadStatsView(APIView):
             ]
 
             results.append({
-                # ─── Identity ───
                 'userId':              user_id,
                 'u_name':              user.u_name,
                 'email':               user.email,
@@ -1274,12 +1273,9 @@ class LeadStatsView(APIView):
                 'hasTeamMember':       member is not None,
                 'teamMemberId':        member.id if member else None,
 
-                # ─── Projects ───
                 'projects':            projects_payload,
                 'projectCount':        len(lead_projects),
 
-                # ─── PROJECT SCOPE (team outcome) ───
-                # Kept under the original field names for backward compat.
                 'totalTasks':          project_stats['total'],
                 'completedTasks':      project_stats['completed'],
                 'inProgressTasks':     project_stats['in_progress'],
@@ -1289,7 +1285,6 @@ class LeadStatsView(APIView):
                 'onTimeRate':          project_stats['on_time_rate'],
                 'hasCompletedWithDue': project_stats['has_completed_due'],
 
-                # ─── PERSONAL SCOPE (individual contribution) ───
                 'personalTotalTasks':          personal_stats['total'],
                 'personalCompletedTasks':      personal_stats['completed'],
                 'personalInProgressTasks':     personal_stats['in_progress'],
@@ -1299,14 +1294,10 @@ class LeadStatsView(APIView):
                 'personalOnTimeRate':          personal_stats['on_time_rate'],
                 'personalHasCompletedWithDue': personal_stats['has_completed_due'],
 
-                # ─── Misc ───
                 'teamSize':            len(member_ids),
                 'directAssignedCount': personal_stats['total'],
             })
 
-        # ─── 4. Sort by personal completion rate desc, then name ─
-        # Personal rate is a better sort key: it reflects the lead's
-        # own throughput, not the team's.
         results.sort(key=lambda r: (-r['personalCompletionRate'], (r['u_name'] or '').lower()))
 
         return success(results)

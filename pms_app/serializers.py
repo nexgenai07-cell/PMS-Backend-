@@ -34,13 +34,6 @@ class LoginSerializer(serializers.Serializer):
         email    = (data["email"] or "").strip().lower()
         password = data["password"]
 
-        # -------------------------------------------------------------
-        # Manually fetch user + check password.
-        #
-        # We do NOT use Django's authenticate() here because its default
-        # ModelBackend returns None for is_active=False users — which
-        # would make an unverified user look like a wrong password.
-        # -------------------------------------------------------------
         try:
             user = User.objects.get(email__iexact=email, is_deleted=False)
         except User.DoesNotExist:
@@ -55,11 +48,6 @@ class LoginSerializer(serializers.Serializer):
                 "code":   "INVALID_PASSWORD",
             })
 
-        # -------------------------------------------------------------
-        # Now that password is confirmed correct, check account state.
-        # Order matters: unverified is more informative than inactive,
-        # so check is_verified BEFORE is_active.
-        # -------------------------------------------------------------
         if not user.is_verified:
             raise serializers.ValidationError({
                 "detail": (
@@ -75,9 +63,6 @@ class LoginSerializer(serializers.Serializer):
                 "code":   "ACCOUNT_INACTIVE",
             })
 
-        # -------------------------------------------------------------
-        # All checks passed — issue tokens
-        # -------------------------------------------------------------
         refresh = RefreshToken.for_user(user)
         return {
             "refresh":     str(refresh),
@@ -94,14 +79,13 @@ class LoginSerializer(serializers.Serializer):
 
 class VerifyEmailSerializer(serializers.Serializer):
     """POST /api/auth/verify-email — body: { uid, token }"""
-    uid   = serializers.CharField()   # base64 string, decoded in validate()
+    uid   = serializers.CharField()
     token = serializers.CharField()
 
     def validate(self, data):
         from django.utils.http import urlsafe_base64_decode
         from django.utils.encoding import force_str
 
-        # Decode the base64 uid back to an integer
         try:
             decoded = force_str(urlsafe_base64_decode(data["uid"]))
             user_id = int(decoded)
@@ -137,7 +121,6 @@ class ResendVerificationSerializer(serializers.Serializer):
     email = serializers.EmailField()
 
     def validate_email(self, value):
-        # Never reveal whether the email exists — same response either way.
         user = User.objects.filter(
             email__iexact=value, is_deleted=False
         ).first()
@@ -218,15 +201,10 @@ class ProjectSerializer(serializers.ModelSerializer):
         return project
 
     def update(self, instance, validated_data):
-        # Allow updating supervisors on PATCH too — fixes Issue #7
-        # (supervisor not saved when editing an existing project).
         supervisors = validated_data.pop("supervisors", None)
-
         instance = super().update(instance, validated_data)
-
         if supervisors is not None:
             instance.supervisors.set(supervisors)
-
         return instance
 
 
@@ -245,14 +223,27 @@ class ProjectListSerializer(serializers.ModelSerializer):
 
 
 # ─────────────────────────────────────────────
-# Task Serializers
+# Task Serializers  (MULTI-ASSIGN + SUBTASKS)
 # ─────────────────────────────────────────────
 
 class TaskSerializer(serializers.ModelSerializer):
-    assign_to_name  = serializers.CharField(source="assign_to.name",  read_only=True)
-    assign_by_name  = serializers.CharField(source="assign_by.u_name", read_only=True)
-    created_by_name = serializers.CharField(source="created_by.u_name", read_only=True)
-    project_name    = serializers.CharField(source="p.p_name",         read_only=True)
+    """
+    Full task serializer.
+
+    NEW fields:
+      - assignees            : list of TeamMember ids (M2M)
+      - assignee_names       : list of TeamMember names
+      - subtask_count        : how many (non-deleted) subtasks this task has
+      - completed_subtasks   : how many of those are done
+      - parent               : parent task id (null for top-level tasks)
+    """
+    assign_to_name     = serializers.SerializerMethodField()
+    assignee_names     = serializers.SerializerMethodField()
+    assign_by_name     = serializers.CharField(source="assign_by.u_name", read_only=True)
+    created_by_name    = serializers.CharField(source="created_by.u_name", read_only=True)
+    project_name       = serializers.CharField(source="p.p_name", read_only=True)
+    subtask_count      = serializers.SerializerMethodField()
+    completed_subtasks = serializers.SerializerMethodField()
 
     progress = serializers.IntegerField(
         min_value=0, max_value=100, required=False, default=0,
@@ -260,33 +251,84 @@ class TaskSerializer(serializers.ModelSerializer):
 
     class Meta:
         model  = Task
-        fields = ["t_id", "title", "desc", "status", "assign_to", "assign_to_name",
-                  "assign_by", "assign_by_name", "created_by", "created_by_name",
-                  "created_at", "p", "project_name", "progress", "priority", "due_date",
-                  "start_date", "update_last", "is_deleted"]
-        read_only_fields = ["t_id", "created_by", "assign_by", "created_at", "update_last"]
+        fields = [
+            "t_id", "title", "desc", "status",
+            "assign_to", "assign_to_name",
+            "assignees", "assignee_names",
+            "assign_by", "assign_by_name",
+            "created_by", "created_by_name",
+            "created_at", "p", "project_name",
+            "parent",
+            "progress", "priority",
+            "due_date", "start_date",
+            "subtask_count", "completed_subtasks",
+            "update_last", "is_deleted",
+        ]
+        read_only_fields = [
+            "t_id", "created_by", "assign_by", "created_at", "update_last",
+        ]
+
+    def get_assign_to_name(self, obj):
+        if not obj.assign_to_id:
+            return None
+        try:
+            return obj.assign_to.name
+        except Exception:
+            return None
+
+    def get_assignee_names(self, obj):
+        return [tm.name for tm in obj.assignees.all()]
+
+    def get_subtask_count(self, obj):
+        return obj.subtasks.filter(is_deleted=False).count()
+
+    def get_completed_subtasks(self, obj):
+        return obj.subtasks.filter(is_deleted=False, status="done").count()
 
     def create(self, validated_data):
-        validated_data["created_by"] = self.context["request"].user
-        validated_data["assign_by"]  = self.context["request"].user
-        return super().create(validated_data)
+        request = self.context["request"]
+        assignees = validated_data.pop("assignees", [])
+
+        validated_data["created_by"] = request.user
+        validated_data["assign_by"]  = request.user
+
+        # If no explicit legacy assign_to, sync from first of assignees
+        if not validated_data.get("assign_to") and assignees:
+            validated_data["assign_to"] = assignees[0]
+
+        task = super().create(validated_data)
+        if assignees:
+            task.assignees.set(assignees)
+        return task
+
+    def update(self, instance, validated_data):
+        assignees = validated_data.pop("assignees", None)
+
+        # Keep legacy assign_to in sync when we know the new assignee set.
+        if assignees is not None:
+            if assignees:
+                validated_data["assign_to"] = assignees[0]
+            else:
+                validated_data["assign_to"] = None
+
+        instance = super().update(instance, validated_data)
+
+        if assignees is not None:
+            instance.assignees.set(assignees)
+
+        return instance
 
 
 class TaskListSerializer(serializers.ModelSerializer):
     """
-    Lightweight task serializer for list views.
-
-    Fields exposed:
-      - t_id, title, status, priority, due_date, progress  (task basics)
-      - p           → Project.id, so the frontend can filter by project
-      - assign_to   → TeamMember.id (the FK value)
-      - assign_to_name → resolved fresh from the FK on every read
-
-    We use SerializerMethodField for `assign_to_name` instead of
-    CharField(source="assign_to.name") so the name can't go stale.
+    Lightweight task serializer for list views. Includes the new
+    multi-assign and subtask metadata so the frontend can render
+    "+N more" badges and subtask progress chips without extra fetches.
     """
-
-    assign_to_name = serializers.SerializerMethodField()
+    assign_to_name     = serializers.SerializerMethodField()
+    assignee_names     = serializers.SerializerMethodField()
+    subtask_count      = serializers.SerializerMethodField()
+    completed_subtasks = serializers.SerializerMethodField()
 
     class Meta:
         model = Task
@@ -296,9 +338,14 @@ class TaskListSerializer(serializers.ModelSerializer):
             "status",
             "priority",
             "due_date",
-            "p",                 # ← project id, needed by the frontend filter
-            "assign_to",         # ← TeamMember id
+            "p",
+            "assign_to",
             "assign_to_name",
+            "assignees",
+            "assignee_names",
+            "parent",
+            "subtask_count",
+            "completed_subtasks",
             "progress",
         ]
 
@@ -309,6 +356,15 @@ class TaskListSerializer(serializers.ModelSerializer):
             return obj.assign_to.name
         except Exception:
             return None
+
+    def get_assignee_names(self, obj):
+        return [tm.name for tm in obj.assignees.all()]
+
+    def get_subtask_count(self, obj):
+        return obj.subtasks.filter(is_deleted=False).count()
+
+    def get_completed_subtasks(self, obj):
+        return obj.subtasks.filter(is_deleted=False, status="done").count()
 
 
 # ─────────────────────────────────────────────

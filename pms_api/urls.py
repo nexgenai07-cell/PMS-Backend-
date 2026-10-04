@@ -29,7 +29,7 @@ from pms_app.views import (
     NotificationListView, NotificationDetailView,
     NotificationMarkReadView, NotificationDeleteView,
     NotificationMarkAllReadView, ProjectStatsView,
-    VerifyEmailView, ResendVerificationView,NotificationUnreadCountView,LeadStatsView ,
+    VerifyEmailView, ResendVerificationView,NotificationUnreadCountView,LeadStatsView ,TaskSubtasksView,
 )
 
 from rest_framework_simplejwt.views import (
@@ -77,6 +77,8 @@ path('api/notifications/del/<n_id>', NotificationDeleteView.as_view(), name='Not
 
     path('api/auth/verify-email',        VerifyEmailView.as_view(),         name='auth_verify_email'),
     path('api/auth/resend-verification', ResendVerificationView.as_view(), name='auth_resend_verification'),
+
+    path('api/task/<t_id>/subtasks', TaskSubtasksView.as_view(), name='task_subtasks'),
 
     path('api/team-members/<id>/stats',TeamMemberStatsView.as_view(),name='team_member_stats'),
     path('api/users/<id>/stats',UserStatsView.as_view(),name='user_stats'),
