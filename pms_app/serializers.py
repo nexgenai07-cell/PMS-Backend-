@@ -145,7 +145,7 @@ class TeamMemberSerializer(serializers.ModelSerializer):
 
     class Meta:
         model  = TeamMember
-        fields = ["id", "name", "desc", "skills", "role", "added_by",
+        fields = ["id", "name", "email", "desc", "skills", "role", "added_by",
                   "added_by_name", "qualitifcation", "experience",
                   "updated_at", "is_deleted"]
         read_only_fields = ["id", "updated_at", "added_by"]
