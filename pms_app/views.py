@@ -12,14 +12,15 @@ from django.utils.http import urlsafe_base64_encode
 from django.utils.encoding import force_bytes
 from django.template.loader import render_to_string
 
-from .tokens import email_verification_token
+from .tokens import email_verification_token, password_change_token
 from .serializers import VerifyEmailSerializer, ResendVerificationSerializer
 
 from .models import User, TeamMember, Project, Task, Comment, Notification, PTeam
 from .serializers import (
     RegisterSerializer, LoginSerializer, UserSerializer, TeamMemberSerializer,
     ProjectSerializer, ProjectListSerializer, TaskSerializer, TaskListSerializer,
-    CommentSerializer, NotificationSerializer, PTeamSerializer, ProjectStatsSerializer
+    CommentSerializer, NotificationSerializer, PTeamSerializer, ProjectStatsSerializer,  RequestPasswordChangeSerializer,
+    ConfirmPasswordChangeSerializer,
 )
 
 
@@ -228,7 +229,114 @@ class ResendVerificationView(APIView):
             )
         })
 
+# ═══════════════════════════════════════════════════════════════
+# PASSWORD CHANGE (email-confirmed)
+# ═══════════════════════════════════════════════════════════════
 
+def _build_password_change_link(request, user, new_password):
+    """
+    Encode {uid, token, new_password} into a frontend URL.
+
+    We embed the new password inside the signed token payload rather than
+    storing it server-side, so the flow remains stateless. The link is
+    single-use because check_token() invalidates once the user's password
+    hash changes (which it does the moment the change is confirmed).
+    """
+    import json, base64
+    from django.utils.http import urlsafe_base64_encode
+    from django.utils.encoding import force_bytes
+
+    uid   = urlsafe_base64_encode(force_bytes(user.id))
+    token = password_change_token.make_token(user)
+
+    # base64-encode the new password so it survives URL transmission
+    payload = base64.urlsafe_b64encode(json.dumps({"p": new_password}).encode()).decode()
+
+    base = getattr(settings, 'FRONTEND_URL', 'http://localhost:5173').rstrip('/')
+    return f"{base}/confirm-password-change?uid={uid}&token={token}&p={payload}"
+
+
+def _send_password_change_email(user, confirm_link):
+    subject = "Confirm your AEEL-PMS password change"
+    context = {
+        "user_name":    user.u_name,
+        "confirm_link": confirm_link,
+        "year":         timezone.now().year,
+    }
+    text_body = render_to_string("pms_app/emails/password_change.txt", context)
+    html_body = render_to_string("pms_app/emails/password_change.html", context)
+
+    msg = EmailMultiAlternatives(
+        subject=subject,
+        body=text_body,
+        from_email=settings.DEFAULT_FROM_EMAIL,
+        to=[user.email],
+    )
+    msg.attach_alternative(html_body, "text/html")
+    msg.send(fail_silently=False)
+
+
+class RequestPasswordChangeView(APIView):
+    """
+    POST /api/auth/request-password-change
+    body: { current, new }
+
+    Validates the request, emails a confirmation link, but does NOT
+    change the password yet.
+    """
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request):
+        serializer = RequestPasswordChangeSerializer(
+            data=request.data, context={"request": request}
+        )
+        if not serializer.is_valid():
+            return error(serializer.errors, status.HTTP_400_BAD_REQUEST)
+
+        user = serializer.context["user"]
+        new_password = serializer.validated_data["new"]
+
+        try:
+            link = _build_password_change_link(request, user, new_password)
+            _send_password_change_email(user, link)
+        except Exception as e:
+            return error(
+                {"detail": f"Could not send confirmation email: {e}. Please try again."},
+                status.HTTP_503_SERVICE_UNAVAILABLE,
+            )
+
+        return success({
+            "message": (
+                "We've emailed you a confirmation link. "
+                "Click it to finish changing your password."
+            ),
+            "email": user.email,
+        })
+
+
+class ConfirmPasswordChangeView(APIView):
+    """
+    POST /api/auth/confirm-password-change
+    body: { uid, token, new_password }
+    """
+    permission_classes = [AllowAny]
+
+    def post(self, request):
+        serializer = ConfirmPasswordChangeSerializer(data=request.data)
+        if not serializer.is_valid():
+            return error(serializer.errors, status.HTTP_400_BAD_REQUEST)
+
+        user = serializer.context["user"]
+        new_password = serializer.validated_data["new_password"]
+
+        user.set_password(new_password)
+        user.save(update_fields=["password", "updated_at"])
+
+        return success({
+            "message": "Password changed successfully. You can now log in with the new password.",
+            "email":   user.email,
+        })
+        
 class NotificationUnreadCountView(APIView):
     """GET /api/notifications/unread-count"""
     permission_classes = [IsAuthenticated]

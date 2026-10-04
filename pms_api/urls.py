@@ -29,7 +29,8 @@ from pms_app.views import (
     NotificationListView, NotificationDetailView,
     NotificationMarkReadView, NotificationDeleteView,
     NotificationMarkAllReadView, ProjectStatsView,
-    VerifyEmailView, ResendVerificationView,NotificationUnreadCountView,LeadStatsView ,TaskSubtasksView,
+    VerifyEmailView, ResendVerificationView,NotificationUnreadCountView,LeadStatsView ,TaskSubtasksView, RequestPasswordChangeView,
+    ConfirmPasswordChangeView,
 )
 
 from rest_framework_simplejwt.views import (
@@ -54,6 +55,13 @@ urlpatterns = [
     path('api/projects/<p_id>/tasks', ProjectTasksView.as_view(), name='ProjectTasksView'),
     path('api/auth/resend-verification', ResendVerificationView.as_view(), name='auth_resend_verification'),
 
+    path('api/auth/request-password-change',
+     RequestPasswordChangeView.as_view(),
+     name='auth_request_password_change'),
+    path('api/auth/confirm-password-change',
+     ConfirmPasswordChangeView.as_view(),
+     name='auth_confirm_password_change'),
+
     path('api/task', TaskListCreateView.as_view(), name='Create Task View'),
     path('api/task/<t_id>', TaskDetailView.as_view(), name='TaskDetailView'),
     path('api/tasks/<t_id>/comments', TaskCommentsView.as_view(), name='TaskCommentsView'),
@@ -63,11 +71,11 @@ urlpatterns = [
     path('api/comments/<c_id>/pin', CommentPinView.as_view(), name='CommentPinView'),
 
     path('api/notifications', NotificationListView.as_view(), name='NotificationListView'),
-path('api/notifications/read-all', NotificationMarkAllReadView.as_view(), name='NotificationMarkAllReadView'),
-path('api/notifications/unread-count', NotificationUnreadCountView.as_view(), name='NotificationUnreadCountView'),
-path('api/notifications/<n_id>', NotificationDetailView.as_view(), name='NotificationDetailView'),
-path('api/notifications/<n_id>/read', NotificationMarkReadView.as_view(), name='NotificationMarkReadView'),
-path('api/notifications/del/<n_id>', NotificationDeleteView.as_view(), name='NotificationDeleteView'),
+    path('api/notifications/read-all', NotificationMarkAllReadView.as_view(), name='NotificationMarkAllReadView'),
+    path('api/notifications/unread-count', NotificationUnreadCountView.as_view(), name='NotificationUnreadCountView'),
+    path('api/notifications/<n_id>', NotificationDetailView.as_view(), name='NotificationDetailView'),
+    path('api/notifications/<n_id>/read', NotificationMarkReadView.as_view(), name='NotificationMarkReadView'),
+    path('api/notifications/del/<n_id>', NotificationDeleteView.as_view(), name='NotificationDeleteView'),
 
     path("api/pteam",PTeamListCreateView.as_view(),name="pteam-list-create"),
     path("api/pteam/<pt_id>",PTeamDetailView.as_view(),name="pteam-detail"),
@@ -83,7 +91,7 @@ path('api/notifications/del/<n_id>', NotificationDeleteView.as_view(), name='Not
     path('api/team-members/<id>/stats',TeamMemberStatsView.as_view(),name='team_member_stats'),
     path('api/users/<id>/stats',UserStatsView.as_view(),name='user_stats'),
     path('api/projects/<p_id>/members/stats',   ProjectTeamMemberStatsView.as_view(), name='project_team_stats'),
- path('api/leads/stats/', LeadStatsView.as_view(), name='leads_stats'),
+    path('api/leads/stats/', LeadStatsView.as_view(), name='leads_stats'),
     # path("api-auth/", include("rest_framework.urls"))
     # path("api/", include("pms_app.urls")),
 

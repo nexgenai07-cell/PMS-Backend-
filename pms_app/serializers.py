@@ -127,7 +127,79 @@ class ResendVerificationSerializer(serializers.Serializer):
         self.context["user"] = user
         return value.lower()
 
+class RequestPasswordChangeSerializer(serializers.Serializer):
+    """
+    POST /api/auth/request-password-change — body: { current, new }
 
+    We *validate* here but do NOT persist. The actual password change
+    happens only when the user clicks the emailed confirmation link.
+    """
+    current = serializers.CharField(write_only=True)
+    new     = serializers.CharField(write_only=True, min_length=8)
+
+    def validate(self, data):
+        user = self.context["request"].user
+        current = data["current"]
+        new     = data["new"]
+
+        if not user.check_password(current):
+            raise serializers.ValidationError({
+                "detail": "Current password is incorrect.",
+                "code":   "INVALID_CURRENT_PASSWORD",
+            })
+
+        if current == new:
+            raise serializers.ValidationError({
+                "detail": "New password must be different from the current one.",
+                "code":   "SAME_AS_CURRENT",
+            })
+
+        self.context["user"] = user
+        return data
+
+
+class ConfirmPasswordChangeSerializer(serializers.Serializer):
+    """
+    POST /api/auth/confirm-password-change — body: { uid, token, new_password }
+    """
+    uid          = serializers.CharField()
+    token        = serializers.CharField()
+    new_password = serializers.CharField(write_only=True, min_length=8)
+
+    def validate(self, data):
+        from django.utils.http import urlsafe_base64_decode
+        from django.utils.encoding import force_str
+
+        try:
+            decoded = force_str(urlsafe_base64_decode(data["uid"]))
+            user_id = int(decoded)
+        except (TypeError, ValueError, OverflowError):
+            raise serializers.ValidationError({
+                "detail": "Invalid password-change link.",
+                "code":   "INVALID_UID",
+            })
+
+        try:
+            user = User.objects.get(id=user_id, is_deleted=False)
+        except User.DoesNotExist:
+            raise serializers.ValidationError({
+                "detail": "Invalid password-change link.",
+                "code":   "USER_NOT_FOUND",
+            })
+
+        from .tokens import password_change_token
+        if not password_change_token.check_token(user, data["token"]):
+            raise serializers.ValidationError({
+                "detail": (
+                    "This password-change link is invalid or has expired. "
+                    "Please request a new one from your profile page."
+                ),
+                "code":   "TOKEN_INVALID_OR_EXPIRED",
+            })
+
+        self.context["user"] = user
+        return data
+        
 class UserSerializer(serializers.ModelSerializer):
     class Meta:
         model  = User
