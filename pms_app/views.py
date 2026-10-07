@@ -36,6 +36,45 @@ def error(msg, status_code=status.HTTP_400_BAD_REQUEST):
     return Response({"success": False, "error": msg}, status=status_code)
 
 
+def _visible_project_ids_for(user):
+    """
+    Return the set of Project IDs the given user is allowed to see.
+
+    Rules (mirrors ProjectListCreateView):
+      - admin       → all non-deleted projects
+      - everyone else → created_by == user
+                        OR user ∈ project.supervisors
+                        OR user is linked (by name) to a TeamMember that
+                          appears in a PTeam row for that project
+
+    Returns a Python set of ints. An empty set means "no projects visible".
+    """
+    if user.role == "admin":
+        return set(
+            Project.objects.filter(is_deleted=False)
+            .values_list("p_id", flat=True)
+        )
+
+    tm_ids = list(
+        TeamMember.objects.filter(
+            name__iexact=user.u_name, is_deleted=0
+        ).values_list("id", flat=True)
+    )
+
+    pteam_project_ids = set(
+        PTeam.objects.filter(tm_id__in=tm_ids)
+        .values_list("p_id", flat=True)
+    )
+
+    qs = Project.objects.filter(is_deleted=False).filter(
+        Q(created_by=user)
+        | Q(supervisors=user)
+        | Q(p_id__in=pteam_project_ids)
+    ).distinct()
+
+    return set(qs.values_list("p_id", flat=True))
+
+
 # ─────────────────────────────────────────────
 # Email verification helpers
 # ─────────────────────────────────────────────
@@ -229,19 +268,12 @@ class ResendVerificationView(APIView):
             )
         })
 
+
 # ═══════════════════════════════════════════════════════════════
 # PASSWORD CHANGE (email-confirmed)
 # ═══════════════════════════════════════════════════════════════
 
 def _build_password_change_link(request, user, new_password):
-    """
-    Encode {uid, token, new_password} into a frontend URL.
-
-    We embed the new password inside the signed token payload rather than
-    storing it server-side, so the flow remains stateless. The link is
-    single-use because check_token() invalidates once the user's password
-    hash changes (which it does the moment the change is confirmed).
-    """
     import json, base64
     from django.utils.http import urlsafe_base64_encode
     from django.utils.encoding import force_bytes
@@ -249,7 +281,6 @@ def _build_password_change_link(request, user, new_password):
     uid   = urlsafe_base64_encode(force_bytes(user.id))
     token = password_change_token.make_token(user)
 
-    # base64-encode the new password so it survives URL transmission
     payload = base64.urlsafe_b64encode(json.dumps({"p": new_password}).encode()).decode()
 
     base = getattr(settings, 'FRONTEND_URL', 'http://localhost:5173').rstrip('/')
@@ -277,13 +308,6 @@ def _send_password_change_email(user, confirm_link):
 
 
 class RequestPasswordChangeView(APIView):
-    """
-    POST /api/auth/request-password-change
-    body: { current, new }
-
-    Validates the request, emails a confirmation link, but does NOT
-    change the password yet.
-    """
     permission_classes = [IsAuthenticated]
 
     def post(self, request):
@@ -315,10 +339,6 @@ class RequestPasswordChangeView(APIView):
 
 
 class ConfirmPasswordChangeView(APIView):
-    """
-    POST /api/auth/confirm-password-change
-    body: { uid, token, new_password }
-    """
     permission_classes = [AllowAny]
 
     def post(self, request):
@@ -336,7 +356,8 @@ class ConfirmPasswordChangeView(APIView):
             "message": "Password changed successfully. You can now log in with the new password.",
             "email":   user.email,
         })
-        
+
+
 class NotificationUnreadCountView(APIView):
     """GET /api/notifications/unread-count"""
     permission_classes = [IsAuthenticated]
@@ -478,32 +499,13 @@ class ProjectListCreateView(APIView):
 
     def get(self, request):
         user = request.user
-        qs = Project.objects.filter(is_deleted=False)
+        visible_ids = _visible_project_ids_for(user)
 
-        if user.role == "admin":
-            projects = qs.order_by("-created_at")
-            return success(ProjectListSerializer(projects, many=True).data)
-
-        team_member_ids = list(
-            TeamMember.objects.filter(
-                name__iexact=user.u_name,
-                is_deleted=0,
-            ).values_list("id", flat=True)
+        projects = (
+            Project.objects
+                .filter(is_deleted=False, p_id__in=visible_ids)
+                .order_by("-created_at")
         )
-
-        member_project_ids = list(
-            PTeam.objects.filter(
-                tm_id__in=team_member_ids
-            ).values_list("p_id", flat=True).distinct()
-        )
-
-        qs = qs.filter(
-            Q(supervisors=user) |
-            Q(created_by=user) |
-            Q(p_id__in=member_project_ids)
-        ).distinct()
-
-        projects = qs.order_by("-created_at")
         return success(ProjectListSerializer(projects, many=True).data)
 
     def post(self, request):
@@ -525,24 +527,10 @@ class ProjectDetailView(APIView):
             return None
 
         user = request.user
-
-        if user.role == "admin":
-            return project
-        if project.created_by_id == user.id:
-            return project
-        if project.supervisors.filter(id=user.id).exists():
-            return project
-
-        team_member_ids = list(
-            TeamMember.objects.filter(
-                name__iexact=user.u_name,
-                is_deleted=0,
-            ).values_list("id", flat=True)
-        )
-        if PTeam.objects.filter(p=project, tm_id__in=team_member_ids).exists():
-            return project
-
-        return None
+        visible_ids = _visible_project_ids_for(user)
+        if project.p_id not in visible_ids:
+            return None
+        return project
 
     def get(self, request, p_id):
         project = self._get_project(request, p_id)
@@ -579,24 +567,10 @@ class ProjectTasksView(APIView):
         except Project.DoesNotExist:
             return error("Project not found.", status.HTTP_404_NOT_FOUND)
 
-        user = request.user
-        team_member_ids = list(
-            TeamMember.objects.filter(
-                name__iexact=user.u_name,
-                is_deleted=0,
-            ).values_list("id", flat=True)
-        )
-
-        authorized = (
-            user.role == "admin" or
-            project.created_by_id == user.id or
-            project.supervisors.filter(id=user.id).exists() or
-            PTeam.objects.filter(p=project, tm_id__in=team_member_ids).exists()
-        )
-        if not authorized:
+        visible_ids = _visible_project_ids_for(request.user)
+        if project.p_id not in visible_ids:
             return error("Project not found.", status.HTTP_404_NOT_FOUND)
 
-        # Only top-level tasks appear in the project task list.
         tasks = Task.objects.filter(
             p__p_id=p_id, is_deleted=False, parent__isnull=True
         ).order_by("-created_at")
@@ -613,7 +587,10 @@ class ProjectStatsView(APIView):
         except Project.DoesNotExist:
             return error("Project not found.", status.HTTP_404_NOT_FOUND)
 
-        # Stats include subtasks — they represent real work items.
+        visible_ids = _visible_project_ids_for(request.user)
+        if project.p_id not in visible_ids:
+            return error("Project not found.", status.HTTP_404_NOT_FOUND)
+
         tasks = Task.objects.filter(p__p_id=p_id, is_deleted=False)
 
         total_tasks       = tasks.count()
@@ -670,7 +647,12 @@ class TaskListCreateView(APIView):
     permission_classes = [IsAuthenticated]
 
     def get(self, request):
-        tasks = Task.objects.filter(is_deleted=False).order_by("-created_at")
+        visible_ids = _visible_project_ids_for(request.user)
+
+        tasks = Task.objects.filter(
+            is_deleted=False,
+            p_id__in=visible_ids,
+        ).order_by("-created_at")
 
         status_filter   = request.query_params.get("status")
         priority_filter = request.query_params.get("priority")
@@ -678,9 +660,6 @@ class TaskListCreateView(APIView):
         project_id      = request.query_params.get("project")
         parent_param    = request.query_params.get("parent")
 
-        # By default, only top-level tasks (no parent). Pass
-        # ?parent=<task_id> to fetch subtasks of a specific task, or
-        # ?parent=null for all top-level tasks.
         if parent_param is not None:
             if parent_param in ("", "null", "none"):
                 tasks = tasks.filter(parent__isnull=True)
@@ -697,7 +676,6 @@ class TaskListCreateView(APIView):
         if priority_filter:
             tasks = tasks.filter(priority=priority_filter)
         if assigned_to:
-            # Match either the M2M assignees or the legacy assign_to FK.
             tasks = tasks.filter(
                 Q(assignees__id=assigned_to) | Q(assign_to__id=assigned_to)
             ).distinct()
@@ -718,20 +696,25 @@ class TaskDetailView(APIView):
     """GET / PATCH / DELETE /api/task/<t_id>/"""
     permission_classes = [IsAuthenticated]
 
-    def _get_task(self, t_id):
+    def _get_task(self, request, t_id):
         try:
-            return Task.objects.get(t_id=t_id, is_deleted=False)
+            task = Task.objects.get(t_id=t_id, is_deleted=False)
         except Task.DoesNotExist:
             return None
 
+        visible_ids = _visible_project_ids_for(request.user)
+        if task.p_id not in visible_ids:
+            return None
+        return task
+
     def get(self, request, t_id):
-        task = self._get_task(t_id)
+        task = self._get_task(request, t_id)
         if not task:
             return error("Task not found.", status.HTTP_404_NOT_FOUND)
         return success(TaskSerializer(task).data)
 
     def patch(self, request, t_id):
-        task = self._get_task(t_id)
+        task = self._get_task(request, t_id)
         if not task:
             return error("Task not found.", status.HTTP_404_NOT_FOUND)
         serializer = TaskSerializer(task, data=request.data, partial=True,
@@ -742,7 +725,7 @@ class TaskDetailView(APIView):
         return error(serializer.errors)
 
     def delete(self, request, t_id):
-        task = self._get_task(t_id)
+        task = self._get_task(request, t_id)
         if not task:
             return error("Task not found.", status.HTTP_404_NOT_FOUND)
         task.soft_delete()
@@ -759,6 +742,10 @@ class TaskSubtasksView(APIView):
         except Task.DoesNotExist:
             return error("Task not found.", status.HTTP_404_NOT_FOUND)
 
+        visible_ids = _visible_project_ids_for(request.user)
+        if parent.p_id not in visible_ids:
+            return error("Task not found.", status.HTTP_404_NOT_FOUND)
+
         subs = parent.subtasks.filter(is_deleted=False).order_by("-created_at")
         return success(TaskSerializer(subs, many=True).data)
 
@@ -766,6 +753,10 @@ class TaskSubtasksView(APIView):
         try:
             parent = Task.objects.get(t_id=t_id, is_deleted=False)
         except Task.DoesNotExist:
+            return error("Task not found.", status.HTTP_404_NOT_FOUND)
+
+        visible_ids = _visible_project_ids_for(request.user)
+        if parent.p_id not in visible_ids:
             return error("Task not found.", status.HTTP_404_NOT_FOUND)
 
         data = request.data.copy()
@@ -988,13 +979,18 @@ class TeamMemberStatsView(APIView):
         except TeamMember.DoesNotExist:
             return error("Team member not found.", status.HTTP_404_NOT_FOUND)
 
-        # Combine M2M + legacy single assignee tasks for this member.
+        visible_project_ids = _visible_project_ids_for(request.user)
+
         tasks = Task.objects.filter(
             Q(assignees__id=id) | Q(assign_to__id=id),
             is_deleted=False,
+            p_id__in=visible_project_ids,
         ).distinct()
 
-        pteam_entries = PTeam.objects.filter(tm__id=id)
+        pteam_entries = PTeam.objects.filter(
+            tm__id=id,
+            p_id__in=visible_project_ids,
+        )
 
         total_tasks       = tasks.count()
         completed_tasks   = tasks.filter(status="done").count()
@@ -1055,8 +1051,8 @@ class UserStatsView(APIView):
         except User.DoesNotExist:
             return error("User not found.", status.HTTP_404_NOT_FOUND)
 
-        # Personal scope: any task where this user's TeamMember profile
-        # appears as a (multi-)assignee.
+        visible_project_ids = _visible_project_ids_for(request.user)
+
         tm_ids = list(
             TeamMember.objects.filter(
                 name__iexact=user.u_name,
@@ -1066,6 +1062,7 @@ class UserStatsView(APIView):
         assigned_tasks = Task.objects.filter(
             Q(assignees__id__in=tm_ids) | Q(assign_to__id__in=tm_ids),
             is_deleted=False,
+            p_id__in=visible_project_ids,
         ).distinct()
 
         total_tasks       = assigned_tasks.count()
@@ -1147,6 +1144,10 @@ class ProjectTeamMemberStatsView(APIView):
         try:
             project = Project.objects.get(p_id=p_id, is_deleted=False)
         except Project.DoesNotExist:
+            return error("Project not found.", status.HTTP_404_NOT_FOUND)
+
+        visible_project_ids = _visible_project_ids_for(request.user)
+        if project.p_id not in visible_project_ids:
             return error("Project not found.", status.HTTP_404_NOT_FOUND)
 
         pteam_entries = PTeam.objects.filter(
@@ -1264,6 +1265,8 @@ class LeadStatsView(APIView):
         }
 
     def get(self, request):
+        visible_project_ids = _visible_project_ids_for(request.user)
+
         leads = User.objects.filter(
             is_deleted=False,
             role__in=['member', 'developer', 'lead'],
@@ -1271,12 +1274,17 @@ class LeadStatsView(APIView):
 
         projects = list(
             Project.objects
-                .filter(is_deleted=False)
+                .filter(is_deleted=False, p_id__in=visible_project_ids)
                 .prefetch_related('supervisors')
         )
         project_by_id = {p.p_id: p for p in projects}
 
-        tasks = list(Task.objects.filter(is_deleted=False))
+        tasks = list(
+            Task.objects.filter(
+                is_deleted=False,
+                p_id__in=visible_project_ids,
+            )
+        )
         task_by_id = {t.t_id: t for t in tasks}
 
         team_members = list(TeamMember.objects.filter(is_deleted=0))
@@ -1312,7 +1320,6 @@ class LeadStatsView(APIView):
             if entry.t_id is not None:
                 tm_pteam_task_ids.setdefault(tm_id, set()).add(entry.t_id)
 
-        # NEW: multi-assign aware — tasks_by_assignee now includes M2M.
         tasks_by_assignee = {}
         for t in tasks:
             if t.assign_to_id is not None:
