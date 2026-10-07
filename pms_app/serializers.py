@@ -74,6 +74,7 @@ class LoginSerializer(serializers.Serializer):
             "name":        user.u_name,
             "role":        user.role,
             "is_verified": user.is_verified,
+            "created_at":  user.created_at,   # ← ADDED — used by notification cutoff
         }
 
 
